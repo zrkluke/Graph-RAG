@@ -1,0 +1,54 @@
+一、確保 plugins 裡面有 apoc jar (並確實放對位置)
+(目前只能透過人工複製檔案，而不是用-v ${PWD.Path}/plugins)
+-v $(pwd)/plugins:/plugins 才可以
+PWD.Path的格式不是 POSIX (Linux) 標準路徑格式，而是 Windows 格式
+C:\Users\XXX\myproject\plugins
+Docker for Windows 的 Linux container 預期看到的是：
+/c/Users/XXX/myproject/plugins
+
+二、確認 docker run 的完整參數
+使用Docker啟動Neo4j (Windows VScode PowerShell)
+
+docker run `
+-p 7474:7474 -p 7687:7687 `
+--name neo4j-apoc `
+-v $(pwd)/plugins:/plugins `
+-e NEO4J_AUTH=neo4j/password `
+-e NEO4J_PLUGINS="[\"apoc\", \"apoc-extended\"]" `
+-e NEO4J_apoc_export_file_enabled=true `
+-e NEO4J_apoc_import_file_enabled=true `
+-e NEO4J_apoc_import_file_use__neo4j__config=true `
+-e NEO4J_dbms_security_procedures_unrestricted='apoc.*,gds.*' `
+-e NEO4J_dbms_security_procedures_allowlist='apoc.*' `
+neo4j:5.26
+
+>> 改寫成docker-compose.yml了
+
+三、啟動成功後，確認 APOC 載入
+docker logs neo4j-apoc
+應該看到
+Plugins loaded: [apoc-extended, apoc]
+
+
+ValueError: Could not use APOC procedures. Please ensure the APOC plugin is installed in Neo4j and that 'apoc.meta.data()' is allowed in Neo4j
+
+https://stackoverflow.com/questions/78956523/valueerror-could-not-use-apoc-procedures-please-ensure-the-apoc-plugin-is-inst
+
+1. copy this file 'apoc-5.14.0-core.jar' from /var/lib/neo4j/labs/ to /var/lib/neo4j/plugins
+
+2. update this file /var/lib/neo4j/conf/neo4j.conf
+
+   dbms.security.procedures.unrestricted=apoc.*
+
+   dbms.security.procedures.allowlist=apoc.*
+
+複製檔案
+docker exec -it neo4j-apoc /bin/bash
+cp /var/lib/neo4j/labs/apoc-5.26.4-core.jar /var/lib/neo4j/plugins/apoc-5.26.4-core.jar
+ls /var/lib/neo4j/plugins/
+
+四、瀏覽器驗證 APOC 有載入
+做完上面兩步驟後，在NEO4J browser(http://localhost:7474/browser)輸入CALL apoc.help("");
+
+五、再測試 apoc.meta.data()
+CALL apoc.meta.data();

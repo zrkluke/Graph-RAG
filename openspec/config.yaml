@@ -1,0 +1,18 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  專案名稱: 法律判決書 Graph RAG 搜尋與圖譜分析系統
+  開發語言: TypeScript / JavaScript (Next.js), Python 3.9+ (處理/解析腳本)
+  主要技術棧:
+    - 前端與後端 API: Next.js (Serverless Route Handlers)
+    - 圖資料庫: Neo4j AuraDB Free (雲端免費託管版)
+    - 大語言模型與向量: OpenAI API (Embedding & Chat)
+    - 實體命名識別與擷取 (NER): spacy (中文模型 zh_core_web_sm / 法律實體特化)
+    - 雲端部署平台: Vercel (完全免費方案額度)
+  專案規範:
+    - 遵循 Spec-Driven Development (SDD) 規格驅動開發工作流程。
+    - 所有 API 設計與圖資料結構變更，需先在 openspec 中撰寫/更新規格說明書，確認後方可進行實作。
+    - 程式碼註解、說明文件與 REST API 回傳內容皆採用繁體中文 (Traditional Chinese)。
+

@@ -229,7 +229,7 @@ export default function GraphNetwork({ results, query }: GraphNetworkProps) {
         },
         physics: {
           barnesHut: {
-            gravity: -1500,
+            gravitationalConstant: -1500,
             centralGravity: 0.2,
             springLength: 160,
             damping: 0.9,

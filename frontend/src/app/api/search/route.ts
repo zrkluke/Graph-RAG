@@ -29,6 +29,15 @@ function getNeo4jDriver(): Driver {
   return globalThis.neo4jDriver;
 }
 
+// 將 Neo4j Integer 物件安全地轉換為 JavaScript 的 number
+function toJSNumber(val: any): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val.toNumber === 'function') return val.toNumber();
+  if (val.low !== undefined) return val.low;
+  return Number(val) || 0;
+}
+
 export async function POST(request: Request) {
   try {
     // 1. 解析前端 Body 傳參
@@ -212,7 +221,7 @@ export async function POST(request: Request) {
             court: item.court || '',
             reason: item.reason || '',
             date: item.date || '',
-            sharedLawCount: item.sharedLawCount || 0,
+            sharedLawCount: toJSNumber(item.sharedLawCount),
           }));
 
           detailsMap.set(rec.get('id'), {
@@ -223,7 +232,7 @@ export async function POST(request: Request) {
             reason: rec.get('reason'),
             mainText: rec.get('main_text'),
             factReason: rec.get('fact_reason'),
-            community: rec.get('community') !== null && rec.get('community') !== undefined ? Number(rec.get('community')) : null,
+            community: rec.get('community') !== null && rec.get('community') !== undefined ? toJSNumber(rec.get('community')) : null,
             judges: rec.get('judges') || [],
             defendants: cleanedDefendants,
             plaintiffs: rec.get('plaintiffs') || [],

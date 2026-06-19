@@ -65,34 +65,72 @@
 
 ## 3. 資料模型設計 (Data Schema)
 
+```mermaid
+classDiagram
+    class Judgment {
+        id: String
+        case_type: String
+        court: String
+        court_level: String
+        date: Date
+        reason: String
+        main_text: String
+        fact_reason: String
+    }
+    class Section {
+        id: String
+        role: String
+        type: String
+        text: String
+        embedding: null
+    }
+    class Law {
+        name: String
+    }
+    class Person {
+        name: String
+    }
+    
+    Judgment --> Section : HAS_SECTION {index: Integer}
+    Judgment --> Law : CITED
+    Judgment --> Person : DEFENDANT / PLAINTIFF / JUDGED_BY / REPRESENTED_BY
+```
+
 ### 3.1 節點類型 (Node Labels)
 * **`Judgment` (判決書)**：
-  * `id`: 判決字號（Unique Index）
+  * `id`: 判決字號（Unique Constraint）
+  * `case_type`: 案件種類（民事 / 刑事 / 行政）
   * `court`: 法院名稱
-  * `court_level`: 法院層級（地方法院、高等法院、最高法院）
-  * `date`: 判決日期
+  * `court_level`: 法院層級（最高法院 / 高等法院 / 地方法院）
+  * `date`: 判決日期 (Date)
   * `reason`: 案由
   * `main_text`: 主文
   * `fact_reason`: 事實及理由全文
-  * `embedding`: 1536 維向量（基於事實及理由文字）
+* **`Section` (段落區塊)**：
+  * `id`: 區塊唯一ID（Unique Constraint，格式為 `"{jid}_sec_{index}"`）
+  * `role`: 發言角色（plaintiff / defendant / court / prosecutor）
+  * `type`: 區塊類型（facts / facts_summary / claims / uncontested / reasoning / evidence_ability / sentencing / confiscation / procedure）
+  * `text`: 本段落清洗後的純文字內容
+  * `embedding`: 1536 維向量（目前預留為 null，未來供向量搜尋使用）
 * **`Person` (相關人名)**：
-  * `name`: 姓名
-  * `role`: 角色（法官、被告、原告、律師、證人）
+  * `name`: 姓名（Unique Constraint）
 * **`Law` (法條)**：
-  * `name`: 法條名稱（如「中華民國刑法第185-3條」）
-* **`Crime` (罪名)**：
-  * `name`: 罪名名稱（如「公共危險罪」）
+  * `name`: 法條名稱（Unique Constraint，如「中華民國刑法第185-3條」）
 
 ### 3.2 關係類型 (Relationship Types)
-* `(:Judgment)-[:DEFENDANT]->(:Person {role: "被告"})`
-* `(:Judgment)-[:JUDGED_BY]->(:Person {role: "法官"})`
+* `(:Judgment)-[:HAS_SECTION {index: Integer}]->(:Section)` (按順序指向各文本段落)
+* `(:Judgment)-[:DEFENDANT]->(:Person)`
+* `(:Judgment)-[:PLAINTIFF]->(:Person)`
+* `(:Judgment)-[:JUDGED_BY]->(:Person)`
+* `(:Judgment)-[:REPRESENTED_BY]->(:Person)`
 * `(:Judgment)-[:CITED]->(:Law)`
-* `(:Judgment)-[:CHARGED_WITH]->(:Crime)`
-* `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)`
+* `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)` (基於向量相似度建立的判決關聯)
 
 ### 3.3 索引策略
-* 對 `Judgment(id)`、`Law(name)`、`Crime(name)`、`Person(name)` 建立 `CONSTRAINT` 唯一性約束。
-* 針對 `Judgment(embedding)` 建立 Neo4j Vector Index，命名為 `judgment_vector_index`。
+* 對 `Judgment(id)`、`Section(id)`、`Law(name)`、`Person(name)` 建立 `CONSTRAINT` 唯一性約束。
+* 針對 `Section(embedding)` 建立 Neo4j Vector Index，命名為 `section_vector_index`。
+* 針對 `Judgment(main_text, fact_reason)` 建立 Neo4j Full-Text Index，命名為 `judgment_text_index`。
+
 
 ---
 

@@ -15,6 +15,7 @@ interface ResultItem {
   defendants: string[];
   plaintiffs: string[];
   citedLaws: string[];
+  community?: number | null;
 }
 
 interface GraphNetworkProps {
@@ -43,11 +44,24 @@ export default function GraphNetwork({ results, query }: GraphNetworkProps) {
       // 實體配色方案 (HSL)
       const colors = {
         query: '#3b82f6',       // 亮藍：查詢情境
-        judgment: '#f97316',    // 橘色：判決書
+        judgment: '#f97316',    // 橘色：預設判決書
         law: '#eab308',         // 亮黃：法規
         judge: '#a855f7',       // 紫色：法官
         defendant: '#ef4444',   // 紅色：被告
         plaintiff: '#10b981',   // 綠色：原告
+      };
+
+      // 根據社群 ID 動態生成對比鮮明且和諧的 HSL 顏色
+      const getCommunityColor = (commId: number) => {
+        const hue = (commId * 137.5) % 360; // 使用黃金比例分佈色相
+        return {
+          background: `hsl(${hue}, 80%, 55%)`,
+          border: `hsl(${hue}, 80%, 38%)`,
+          highlight: {
+            background: `hsl(${hue}, 90%, 62%)`,
+            border: `hsl(${hue}, 90%, 42%)`
+          }
+        };
       };
 
       // 2. 加入中心查詢節點
@@ -73,14 +87,17 @@ export default function GraphNetwork({ results, query }: GraphNetworkProps) {
         const jLabel = jId.includes(',') ? jId.split(',').slice(-2, -1)[0] : jId;
         const shortLabel = jLabel.length > 12 ? jLabel.slice(0, 10) + '...' : jLabel;
 
-        const jTitle = `法院：${r.court}\n案由：${r.reason}\n字號：${r.id}\n相似度：${r.maxSectionScore.toFixed(4)}`;
+        const hasCommunity = r.community !== null && r.community !== undefined;
+        const commInfo = hasCommunity ? `\nLeiden 社群分群：社群 ${r.community}` : '';
+        const jTitle = `法院：${r.court}\n案由：${r.reason}\n字號：${r.id}\n相似度：${r.maxSectionScore.toFixed(4)}${commInfo}`;
 
         // 加入判決書節點
         if (!addedNodes.has(jId)) {
+          const commColor = hasCommunity ? getCommunityColor(r.community!) : null;
           nodes.push({
             id: jId,
             label: `⚖️ ${shortLabel}`,
-            color: {
+            color: commColor || {
               background: colors.judgment,
               border: '#c2410c',
               highlight: { background: '#ea580c', border: '#9a3412' }
@@ -265,7 +282,7 @@ export default function GraphNetwork({ results, query }: GraphNetworkProps) {
   return (
     <div className="bg-white p-3 rounded-xl border border-gray-200">
       <div className="text-xs text-gray-500 mb-2 flex justify-between items-center">
-        <span>💡 <b>圖譜說明：</b>藍色為您的搜尋；橘色為判決書；黃色為法規；紫色為法官；紅綠為被告與原告。</span>
+        <span>💡 <b>圖譜說明：</b>藍色為查詢；彩色為判決（顏色反映 Leiden 法律適用社群分群）；黃色為法規；紫色為法官；紅綠為被告與原告。</span>
         <span className="font-bold text-blue-600">🖱️ 滑鼠可拖曳節點、滾輪可放大縮小</span>
       </div>
       <div 

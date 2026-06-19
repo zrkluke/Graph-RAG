@@ -55,3 +55,13 @@ tutorial/
 # =========================================================================
 scripts/temp_graph.html
 lib/
+
+# =========================================================================
+# Next.js 前端依賴與產出物
+# =========================================================================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env*.local
+frontend/.vercel/

@@ -1,0 +1,11 @@
+# 忽略敏感的本地環境變數
+.env*.local
+
+# 忽略本地建置快取與依賴
+.next/
+node_modules/
+
+# 忽略 IDE 與系統產生的檔案
+.DS_Store
+*.pem
+*.tsbuildinfo

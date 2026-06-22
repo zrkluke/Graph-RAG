@@ -155,12 +155,13 @@ cp .env.example frontend/.env.local
 * [ ] **判決書相似度關係 (`:SIMILAR_TO` 關係)**：研議是否在後端計算 Judgment 之間的向量相似度，並在圖資料庫中建立 `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)` 關係，以加速關聯推薦。
 * [x] **段落向量索引命名對齊**：目前實際代碼使用 `section_embedding_index`，而規格書規劃為 `section_vector_index`，待後續統一命名規範。
 * [x] **段落文字分塊與重疊度 (Chunk Size & Overlap) 參數調優**：目前 `judgment_splitter.py` 的分塊切分邏輯是固定規則，未來應實驗不同的 Chunk Size 與 Overlap 大小，以評估對向量搜尋召回率 (Recall) 的影響。
+* [ ] **OpenAI Embedding 快取機制與成本控管**：於資料庫中實作向量 Embedding 快取（如於 Supabase 中建立 Cache 表），避免重複的情境查詢與重複導入時重複呼叫 OpenAI API，降低 API 呼叫成本並加速搜尋響應時間（快取命中時預估 <10ms）。
 
 ### 3. 系統維運與資料流水線 (Pipeline & Ops)
 * [ ] **全量判決書資料之 Chunking 與 Embedding 更新**：目前程式碼已全面支援新版階層式分塊架構，但資料庫中既有的歷史判決書尚未進行全量重新切分（Chunking）與向量補全（Embedding）之覆蓋更新。
 * [ ] **社群偵測自動化更新**：目前 `community_detection.py` 需手動執行，未來應規劃為與資料匯入流水線整合（如每當新資料匯入達到一定數量時自動觸發，或以 Cron Job 定期執行）。
 * [ ] **環境變數同步腳本**：目前根目錄的 `.env` (Python 使用) 與 `frontend/.env.local` (Next.js 使用) 需手動同步，可開發一個一鍵同步/產生環境變數的輔助腳本。
-* [ ] **AuraDB 連線池與並行寫入優化**：針對 `import_sample.py` 執行多執行緒寫入時，在高併發或雲端免費版頻率限制下可能觸發的連線溢出或鎖定 (Lock) 進行重試機制與連線池優化。
+* [ ] **AuraDB 連線池與交易重試優化**：重構至 Node.js 後，寫入事務應改用 Neo4j Driver 的 `executeWrite()` 自動重試事務封裝，以應對高併發下免費版 AuraDB 易觸發的 `Forseti Deadlock`（死結）與連線溢出問題。
 
 ### 4. 前端進階搜尋與 UI 升級
 * [ ] **多條件複合篩選 (Advanced Filter)**：前端 UI 進一步整合法院別、審判法官、特定法規等複合式查詢條件。
@@ -186,6 +187,7 @@ cp .env.example frontend/.env.local
 * [ ] **LLM 綜合分析與回答面板 (RAG Generation Phase)**：目前系統僅提供相似判決搜尋與圖譜展示，未來應新增 LLM 分析對話框。當檢索出 Top K 判決後，由 LLM 基於這些判決事實，綜合解答使用者的複雜法律問題（如：「此類酒駕肇事致死案件，法院判刑的平均刑期大概是多少？有無加重處罰之趨勢？」）。
 * [ ] **建立檢索評估測試集 (Evaluation Gold Standard)**：建立一個包含 20-30 個標準法律自然語言查詢的評估測試集（包含預期的正確判決書 ID 與對應法規），用以評估並優化 RRF 混合搜尋權重、向量模型與分塊參數，避免在沒有量化指標的情況下盲目調優。
 * [ ] **混合檢索評分正規化與權重調優 (Score Normalization)**：目前 API 的 Lucene Full-text Score (1.0~50.0) 與 Vector Cosine Similarity (0.5~0.9) 尺度完全不同。應實施分數正規化（如 Min-Max Scaling），並允許調整混合搜尋的權重參數 $\alpha$。
+* [ ] **中文全文檢索分詞器優化**：因 Neo4j 預設分析器對繁體中文支援有限，評估在建立 `judgment_text_index` 時指定使用 `cjk` 分詞器，或是在前端查詢時先進行客戶端斷詞（如 Jieba），以大幅提升關鍵字與模糊字詞檢索的精準度。
 
 ### 8. 社群語意命名與 UX 優化 (UX & Community Semantics)
 * [ ] **動態社群語意命名**：目前的 `community` 社群偵測僅顯示隨機整數（如社群 0, 1, 2），對使用者缺乏直觀意義。應實施「社群命名機制」：提取該社群中被引用次數最高且最具代表性的法規或罪名，自動將社群命名（例如：「刑法第 185-3 條 — 酒駕公共危險罪社群」），以顯著提升圖譜視覺化的易讀性。
@@ -194,9 +196,10 @@ cp .env.example frontend/.env.local
 * [ ] **將 Python 資料處理腳本重構至 Node.js (TypeScript)**：
   * 將現有的 Python 資料解析、清洗與匯入邏輯（如 `import_judgments.py`、`statute_parser.py`、`text_cleaner.py`）重構為 Node.js (TypeScript) 版本。
   * 達成全專案統一使用 TypeScript 單一語言棧，以利程式碼在「前端 API 路由」與「後端導入腳本」間高度複用，並免除 Python 虛擬環境維護。
-* [ ] **實作 Vercel Cron Job 增量同步排程**：
+* [ ] **實作 Vercel Cron Job 增量同步排程與刪除機制**：
   * 在 `vercel.json` 中配置台灣時間凌晨 1:00（即 UTC 17:00 `"0 17 * * *"`）觸發同步 API，以完全契合司法院 API 的開放服務時段 (0:00 ~ 6:00)。
   * 串接司法院開放 API，實現每日自動獲取 7 天前異動裁判書 ID (JList) 的增量更新，並依規格書實施 JID 覆蓋與不公開案件的 `DETACH DELETE` 物理刪除。
+* [ ] **確保增量寫入之冪等性 (Idempotency)**：於 JID 內容更新覆蓋時，在寫入新 Section 前，需先物理刪除該 Judgment 關聯的舊 `Section` 節點與其 `[:HAS_SECTION]` 關係，避免段落數量變更時殘留孤兒節點。
 * [ ] **採用 Supabase Postgres-backed Queue 搭配 Vercel Cron 定時 Pull 的控流架構 (定案)**：
   * **佇列設計 (Broker)**：於免費的 Supabase PostgreSQL 中建立 `jobs` 資料表（欄位含 `id`, `jid`, `status`, `error_message`, `retry_count`），作為任務緩衝佇列。
   * **發布者 (Publisher)**：每日凌晨 1:00 由 Vercel Cron 觸發主同步 API，將司法院 `JList` 的所有異動 JID 在數毫秒內批量新增（Bulk Insert）至 `jobs` 表（狀態設為 `pending`），徹底消除 Vercel Serverless 的 10 秒執行超時風險。

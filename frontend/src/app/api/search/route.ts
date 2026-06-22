@@ -94,9 +94,10 @@ export async function POST(request: Request) {
       const tStart = performance.now();
       try {
         const cypher = `
-          CALL db.index.vector.queryNodes('section_embedding_index', 100, $queryVector)
-          YIELD node AS sec, score
-          MATCH (j:Judgment)-[:HAS_SECTION]->(sec)
+          CALL db.index.vector.queryNodes('chunk_embedding_index', 100, $queryVector)
+          YIELD node AS chunk, score
+          MATCH (s:Section)-[:HAS_CHUNK]->(chunk)
+          MATCH (j:Judgment)-[:HAS_SECTION]->(s)
           WHERE ($courtLevel IS NULL OR j.court_level = $courtLevel)
             AND ($caseType IS NULL OR j.case_type = $caseType)
           RETURN j.id AS id, max(score) AS score

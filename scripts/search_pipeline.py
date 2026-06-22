@@ -72,12 +72,13 @@ def search_similar_judgments(query_text, court_level=None, case_type=None, limit
         with driver.session() as session:
             # 混合檢索 Cypher 查詢 (只回傳結構與過濾排序結果，無 LLM 文本生成)
             cypher_query = """
-            // 1. 向量搜尋最相近的 Section，設定較大的初篩空間 (如 100 筆)
-            CALL db.index.vector.queryNodes('section_embedding_index', 100, $queryVector)
-            YIELD node AS sec, score
+            // 1. 向量搜尋最相近的 Chunk，設定較大的初篩空間 (如 100 筆)
+            CALL db.index.vector.queryNodes('chunk_embedding_index', 100, $queryVector)
+            YIELD node AS chunk, score
             
-            // 2. 透過 HAS_SECTION 關係關聯回 Judgment 判決書
-            MATCH (j:Judgment)-[:HAS_SECTION]->(sec)
+            // 2. 透過關係向上還原至 Section 與 Judgment 判決書
+            MATCH (s:Section)-[:HAS_CHUNK]->(chunk)
+            MATCH (j:Judgment)-[:HAS_SECTION]->(s)
             
             // 3. 套用法院層級與案件大類篩選
             WHERE ($court_level IS NULL OR j.court_level = $court_level)
@@ -89,7 +90,7 @@ def search_similar_judgments(query_text, court_level=None, case_type=None, limit
             OPTIONAL MATCH (j)-[:PLAINTIFF]->(plaintiff:Person)
             OPTIONAL MATCH (j)-[:CITED]->(law:Law)
             
-            // 5. 聚合數據，取該判決書下 Section 匹配的最高得分作為 Judgment 的相似度分數
+            // 5. 聚合數據，取該判決書下 Chunk 匹配的最高得分作為 Judgment 的相似度分數
             RETURN 
               j.id AS id,
               j.court AS court,

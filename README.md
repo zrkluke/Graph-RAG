@@ -189,5 +189,26 @@ cp .env.example frontend/.env.local
 ### 8. 社群語意命名與 UX 優化 (UX & Community Semantics)
 * [ ] **動態社群語意命名**：目前的 `community` 社群偵測僅顯示隨機整數（如社群 0, 1, 2），對使用者缺乏直觀意義。應實施「社群命名機制」：提取該社群中被引用次數最高且最具代表性的法規或罪名，自動將社群命名（例如：「刑法第 185-3 條 — 酒駕公共危險罪社群」），以顯著提升圖譜視覺化的易讀性。
 
+### 9. 數據導入流水線重構與自動同步 (Node.js & Cron Ingestion)
+* [ ] **將 Python 資料處理腳本重構至 Node.js (TypeScript)**：
+  * 將現有的 Python 資料解析、清洗與匯入邏輯（如 `import_judgments.py`、`statute_parser.py`、`text_cleaner.py`）重構為 Node.js (TypeScript) 版本。
+  * 達成全專案統一使用 TypeScript 單一語言棧，以利程式碼在「前端 API 路由」與「後端導入腳本」間高度複用，並免除 Python 虛擬環境維護。
+* [ ] **實作 Vercel Cron Job 增量同步排程**：
+  * 在 `vercel.json` 中配置台灣時間凌晨 1:00（即 UTC 17:00 `"0 17 * * *"`）觸發同步 API，以完全契合司法院 API 的開放服務時段 (0:00 ~ 6:00)。
+  * 串接司法院開放 API，實現每日自動獲取 7 天前異動裁判書 ID (JList) 的增量更新，並依規格書實施 JID 覆蓋與不公開案件的 `DETACH DELETE` 物理刪除。
+* [ ] **採用 Supabase Postgres-backed Queue 搭配 Vercel Cron 定時 Pull 的控流架構 (定案)**：
+  * **佇列設計 (Broker)**：於免費的 Supabase PostgreSQL 中建立 `jobs` 資料表（欄位含 `id`, `jid`, `status`, `error_message`, `retry_count`），作為任務緩衝佇列。
+  * **發布者 (Publisher)**：每日凌晨 1:00 由 Vercel Cron 觸發主同步 API，將司法院 `JList` 的所有異動 JID 在數毫秒內批量新增（Bulk Insert）至 `jobs` 表（狀態設為 `pending`），徹底消除 Vercel Serverless 的 10 秒執行超時風險。
+  * **消費者 (Consumer / Pull 模式)**：設定另一個 Vercel Cron 每分鐘執行一次，主動拉取（Pull）前 20 筆待處理任務（利用 `SELECT ... FOR UPDATE SKIP LOCKED` 鎖定防重複消費）。
+  * **速率限制與健壯性 (Rate Limiting)**：在 Consumer API 內利用 `p-limit` 以溫和的速率（如每秒 1 筆）非同步下載裁判書全文並寫入 Neo4j，以避免瞬間發起千筆請求而被司法院防爬蟲系統封鎖 IP，同時享有 SQL 等級的失敗重試與高可觀測性。
+  * **定時清除 JOB (垃圾回收機制，待選方案)**：
+    * **方案 A (成功即刪除)**：Consumer 處理成功後直接 `DELETE` 該筆 Job，僅保留待處理與失敗任務，空間佔用最小。
+    * **方案 B (定期批次清理)**：於每日主同步 API 開頭，定時清理 7 天前已成功及 30 天前已失敗的任務，保留短期歷史紀錄便於偵錯。
+    * **方案 C (Postgres pg_cron 自動化)**：於 Supabase 啟用 `pg_cron` 套件，在資料庫內部設定每週定時任務，自動清除 7 天前的舊數據，免去 Vercel 調用。
+* [ ] **自建輕量級資料同步監控儀表板 (Sync Dashboard / Admin UI)**：
+  * 於 Next.js 前端自建一個受保護的管理員後台網頁，直接拉取並呈現 Supabase `jobs` 表的即時同步統計（成功/失敗/Pending 筆數）。
+  * 條列所有失敗的同步任務，直接顯示其 `error_message` 以利快速排查，並提供「手動一鍵重試 (Retry)」按鈕以重置失敗任務狀態並重新觸發更新。
+
+
 
 

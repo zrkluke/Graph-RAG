@@ -153,10 +153,11 @@ cp .env.example frontend/.env.local
 
 ### 2. 向量搜尋與圖譜推理演算法
 * [ ] **判決書相似度關係 (`:SIMILAR_TO` 關係)**：研議是否在後端計算 Judgment 之間的向量相似度，並在圖資料庫中建立 `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)` 關係，以加速關聯推薦。
-* [ ] **段落向量索引命名對齊**：目前實際代碼使用 `section_embedding_index`，而規格書規劃為 `section_vector_index`，待後續統一命名規範。
-* [ ] **段落文字分塊與重疊度 (Chunk Size & Overlap) 參數調優**：目前 `judgment_splitter.py` 的分塊切分邏輯是固定規則，未來應實驗不同的 Chunk Size 與 Overlap 大小，以評估對向量搜尋召回率 (Recall) 的影響。
+* [x] **段落向量索引命名對齊**：目前實際代碼使用 `section_embedding_index`，而規格書規劃為 `section_vector_index`，待後續統一命名規範。
+* [x] **段落文字分塊與重疊度 (Chunk Size & Overlap) 參數調優**：目前 `judgment_splitter.py` 的分塊切分邏輯是固定規則，未來應實驗不同的 Chunk Size 與 Overlap 大小，以評估對向量搜尋召回率 (Recall) 的影響。
 
 ### 3. 系統維運與資料流水線 (Pipeline & Ops)
+* [ ] **全量判決書資料之 Chunking 與 Embedding 更新**：目前程式碼已全面支援新版階層式分塊架構，但資料庫中既有的歷史判決書尚未進行全量重新切分（Chunking）與向量補全（Embedding）之覆蓋更新。
 * [ ] **社群偵測自動化更新**：目前 `community_detection.py` 需手動執行，未來應規劃為與資料匯入流水線整合（如每當新資料匯入達到一定數量時自動觸發，或以 Cron Job 定期執行）。
 * [ ] **環境變數同步腳本**：目前根目錄的 `.env` (Python 使用) 與 `frontend/.env.local` (Next.js 使用) 需手動同步，可開發一個一鍵同步/產生環境變數的輔助腳本。
 * [ ] **AuraDB 連線池與並行寫入優化**：針對 `import_sample.py` 執行多執行緒寫入時，在高併發或雲端免費版頻率限制下可能觸發的連線溢出或鎖定 (Lock) 進行重試機制與連線池優化。

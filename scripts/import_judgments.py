@@ -128,6 +128,7 @@ def init_db(driver):
         print("建立 Unique Constraints...")
         session.run("CREATE CONSTRAINT judgment_id_unique IF NOT EXISTS FOR (j:Judgment) REQUIRE j.id IS UNIQUE")
         session.run("CREATE CONSTRAINT section_id_unique IF NOT EXISTS FOR (s:Section) REQUIRE s.id IS UNIQUE")
+        session.run("CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE")
         session.run("CREATE CONSTRAINT law_name_unique IF NOT EXISTS FOR (l:Law) REQUIRE l.name IS UNIQUE")
         session.run("CREATE CONSTRAINT person_name_unique IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE")
         
@@ -183,6 +184,20 @@ def write_to_neo4j(tx, data):
         MERGE (j)-[:HAS_SECTION {index: sec.index}]->(s)
         """
         tx.run(section_query, id=data["judgment"]["id"], sections=data["sections"])
+        
+    # 1.6 批次寫入 Chunk 節點並與 Section 連接
+    if data.get("chunks"):
+        chunk_query = """
+        UNWIND $chunks AS chk
+        MERGE (c:Chunk {id: chk.id})
+        ON CREATE SET 
+          c.text = chk.text
+        ON MATCH SET
+          c.text = chk.text
+        MERGE (s:Section {id: chk.section_id})
+        MERGE (s)-[:HAS_CHUNK {index: chk.index}]->(c)
+        """
+        tx.run(chunk_query, chunks=data["chunks"])
         
     # 2. 批次寫入並連接 Law 節點
     if data["laws"]:
@@ -340,14 +355,26 @@ def import_judgments(data_dir: str, limit: int = None):
                 # 進行 Section 段落切分
                 sections_list = split_judgment_into_sections(court_info["case_type"], fact_reason)
                 formatted_sections = []
+                formatted_chunks = []
                 for sec in sections_list:
+                    sec_id = f"{jid}_sec_{sec['index']}"
                     formatted_sections.append({
-                        "id": f"{jid}_sec_{sec['index']}",
+                        "id": sec_id,
                         "index": sec["index"],
                         "role": sec["role"],
                         "type": sec["type"],
                         "text": sec["text"]
                     })
+                    
+                    # 處理 Section 底下的 Chunks
+                    chunks_list = sec.get("chunks", [])
+                    for chk_idx, chk_text in enumerate(chunks_list, 1):
+                        formatted_chunks.append({
+                            "id": f"{sec_id}_chk_{chk_idx}",
+                            "section_id": sec_id,
+                            "index": chk_idx,
+                            "text": chk_text
+                        })
 
                 import_data = {
                     "judgment": {
@@ -361,6 +388,7 @@ def import_judgments(data_dir: str, limit: int = None):
                         "fact_reason": fact_reason
                     },
                     "sections": formatted_sections,
+                    "chunks": formatted_chunks,
                     "laws": laws_list,
                     "parties": parties
                 }

@@ -147,12 +147,94 @@ def split_judgment_into_sections(case_type: str, fact_reason: str) -> list[dict]
     for sec in sections:
         cleaned_text = sec["text"].strip()
         if cleaned_text:
+            # 對每個 Section 進行細粒度切分
+            chunks = split_text_into_chunks(cleaned_text, chunk_size=1000, overlap=150)
             final_sections.append({
                 "index": idx,
                 "role": sec["role"],
                 "type": sec["type"],
-                "text": cleaned_text
+                "text": cleaned_text,
+                "chunks": chunks
             })
             idx += 1
             
     return final_sections
+
+
+def split_text_into_chunks(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
+    """
+    將大文本 text 進行遞迴字元切分，優先以中文自然段落與標點切割，
+    並在相鄰區間保留指定的 overlap。
+    """
+    if not text:
+        return []
+        
+    separators = ['\r\n\r\n', '\n\n', '\r\n', '\n', '。', '；', '，', ' ', '']
+    
+    def _split(text_to_split: str, current_seps: list[str]) -> list[str]:
+        if len(text_to_split) <= chunk_size:
+            return [text_to_split]
+        if not current_seps:
+            # 沒有分隔符了，直接硬切
+            chunks = []
+            for idx in range(0, len(text_to_split), chunk_size - overlap):
+                chunk = text_to_split[idx:idx + chunk_size]
+                if chunk:
+                    chunks.append(chunk)
+            return chunks
+            
+        sep = current_seps[0]
+        # 用當前的 separator 分割
+        if sep == '':
+            parts = list(text_to_split)
+        else:
+            parts = text_to_split.split(sep)
+            
+        chunks = []
+        current_chunk = []
+        current_len = 0
+        
+        for part in parts:
+            # 加上分隔符的長度（除最後一部分外）
+            part_len = len(part) + len(sep)
+            
+            if current_len + part_len <= chunk_size:
+                current_chunk.append(part)
+                current_len += part_len
+            else:
+                # 當前累積的 chunk 超過 limit
+                if current_chunk:
+                    chunk_text = sep.join(current_chunk)
+                    chunks.append(chunk_text)
+                    
+                    # 考慮 overlap：從 current_chunk 的尾端保留部分元素
+                    overlap_chunk = []
+                    overlap_len = 0
+                    for p in reversed(current_chunk):
+                        if overlap_len + len(p) + len(sep) <= overlap:
+                            overlap_chunk.insert(0, p)
+                            overlap_len += len(p) + len(sep)
+                        else:
+                            break
+                    current_chunk = overlap_chunk
+                    current_len = overlap_len
+                
+                # 對於當前這個 part，如果它大於 chunk_size，需要遞迴切分它
+                if len(part) > chunk_size:
+                    sub_chunks = _split(part, current_seps[1:])
+                    for sc in sub_chunks[:-1]:
+                        chunks.append(sc)
+                    if sub_chunks:
+                        current_chunk.append(sub_chunks[-1])
+                        current_len += len(sub_chunks[-1]) + len(sep)
+                else:
+                    current_chunk.append(part)
+                    current_len += part_len
+                    
+        if current_chunk:
+            chunks.append(sep.join(current_chunk))
+            
+        return chunks
+        
+    return _split(text, separators)
+

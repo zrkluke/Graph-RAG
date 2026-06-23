@@ -97,6 +97,8 @@
 ## 5. 開發指南與階段任務
 
 作為開發代理人，在接續的工作中請遵守：
-1. **以 `openspec` 驅動**：任何具體的 API 實作、圖譜解析腳本，應先使用 `openspec` 建立變更提案（Proposal）及設計規格。
+1. **以 `openspec` 驅動與平台雙向同步**：進行任何 API 實作、圖譜解析或重大代碼重構前，AI 助理必須同時：
+   * 在平台指定的路徑建立並維護 `implementation_plan.md`（以通過 AI 平台 UI 的審查解鎖）。
+   * 在 `openspec/changes/<change-name>/` 底下建立對應的 `proposal.md`、`design.md` 與 `tasks.md`（以維持專案永久技術規格的完整性與版控）。
 2. **語系規範**：本專案的所有代碼註解、說明、終端輸出與前端 UI，**一律採用繁體中文 (Traditional Chinese)**。
 3. **模組化**：擷取與解析腳本放在 `scripts/`，Next.js App 結構放在 `frontend/` (或根目錄的 `app/`)。

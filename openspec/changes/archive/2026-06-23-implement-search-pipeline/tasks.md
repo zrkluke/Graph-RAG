@@ -1,15 +1,15 @@
 ## 1. Vector Ingestion & Indexing
 
-- [ ] 1.1 在 `scripts/update_embeddings.py` 中，實作對未生成向量之 Section 節點批量調用 OpenAI Embedding API (text-embedding-3-small) 並寫回 Neo4j 的邏輯。
-- [ ] 1.2 於 `scripts/update_embeddings.py` 啟動時，新增自動檢測與建立 Neo4j `section_embedding_index` 向量索引的 Cypher 指令。
+- [x] 1.1 在 `scripts/update_embeddings.py` 中，實作對未生成向量之 Section 節點批量調用 OpenAI Embedding API (text-embedding-3-small) 並寫回 Neo4j 的邏輯。
+- [x] 1.2 於 `scripts/update_embeddings.py` 啟動時，新增自動檢測與建立 Neo4j `section_embedding_index` 向量索引的 Cypher 指令。
 
 ## 2. Hybrid Retrieval Pipeline
 
-- [ ] 2.1 實作核心檢索程式 `scripts/search_pipeline.py`，完成情境描述向量化與 Cypher 混合圖譜向量搜尋，提取並去重關聯關係人與法條。
+- [x] 2.1 實作核心檢索程式 `scripts/search_pipeline.py`，完成情境描述向量化與 Cypher 混合圖譜向量搜尋，提取並去重關聯關係人與法條。
 
 ## 3. Local UI Prototype
 
-- [ ] 3.1 實作基於 Gradio 的互動式本地網頁檢索介面 `scripts/search_ui.py`，支援輸入描述與選取法院/案件類別過濾，並渲染檢索結果。
+- [x] 3.1 實作基於 Gradio 的互動式本地網頁檢索介面 `scripts/search_ui.py`，支援輸入描述與選取法院/案件類別過濾，並渲染檢索結果。
 
 ---
 

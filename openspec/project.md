@@ -46,7 +46,7 @@
 ```
 
 ### 2.1 數據導入模組 (Data Ingestion Script)
-* 開發獨立的 Python / TypeScript 解析腳本（位於 `scripts/`），用以讀取司法院 OpenData 的判決書 JSON 檔案。
+* 開發獨立的 TypeScript 解析腳本（位於 `frontend/src/scripts/`），用以讀取司法院 OpenData 的判決書 JSON 檔案。
 * 執行數據清洗、文字分塊與實體擷取，並批量寫入 Neo4j。
 
 ### 2.2 實體與關係擷取 (NER)

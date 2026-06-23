@@ -6,9 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:connect-test": "tsx src/scripts/test_neo4j_connection.ts",
+    "db:import": "tsx src/scripts/import_judgments.ts",
+    "db:import-sample": "tsx src/scripts/import_sample.ts",
+    "db:community": "tsx src/scripts/community_detection.ts",
+    "db:update-embeddings": "tsx src/scripts/update_embeddings.ts",
+    "db:verify": "tsx src/scripts/verify_db.ts",
+    "db:search": "tsx src/scripts/search_pipeline.ts"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "neo4j-driver": "^5.21.0",
     "next": "16.2.9",
     "openai": "^4.52.0",
@@ -24,6 +32,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
+    "tsx": "^4.15.7",
     "typescript": "^5"
   }
 }

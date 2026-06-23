@@ -1,0 +1,17 @@
+{
+  "name": "taiwan-judgment-search",
+  "version": "1.0.0",
+  "description": "台灣法律判決書 Graph RAG 搜尋系統",
+  "scripts": {
+    "db:connect-test": "npm run db:connect-test --prefix frontend",
+    "db:import": "npm run db:import --prefix frontend",
+    "db:import-sample": "npm run db:import-sample --prefix frontend",
+    "db:community": "npm run db:community --prefix frontend",
+    "db:update-embeddings": "npm run db:update-embeddings --prefix frontend",
+    "db:verify": "npm run db:verify --prefix frontend",
+    "db:search": "npm run db:search --prefix frontend",
+    "dev": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "start": "npm run start --prefix frontend"
+  }
+}

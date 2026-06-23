@@ -20,10 +20,10 @@
 ```mermaid
 flowchart TD
     %% 資料匯入流程
-    Sub1[司法院 OpenData / JSON] -->|1. 解析 & 清洗| scripts/court_parser.py
-    scripts/court_parser.py -->|2. NER 實體與關係抽取| scripts/import_judgments.py
-    scripts/import_judgments.py -->|3. 調用 OpenAI Embedding| OpenAI_Embed[OpenAI Embedding API]
-    scripts/import_judgments.py -->|4. 寫入節點與關係| Neo4j[(Neo4j AuraDB Free)]
+    Sub1[司法院 OpenData / JSON] -->|1. 解析 & 清洗| scripts/court_parser.ts
+    scripts/court_parser.ts -->|2. NER 實體與關係抽取| scripts/import_judgments.ts
+    scripts/import_judgments.ts -->|3. 調用 OpenAI Embedding| OpenAI_Embed[OpenAI Embedding API]
+    scripts/import_judgments.ts -->|4. 寫入節點與關係| Neo4j[(Neo4j AuraDB Free)]
 
     %% 搜尋檢索流程
     User((使用者輸入情境)) -->|5. 輸入描述與篩選條件| Frontend[Next.js React UI]
@@ -81,17 +81,18 @@ flowchart TD
 ├── .env.example                # 環境變數範例模板
 ├── AGENTS.md                   # 法律判決書 Graph RAG 開發指引 (世界觀與限制說明)
 ├── docker-compose.yml          # 本地 Neo4j 資料庫容器配置 (預設連接 Bolt: 7687)
-├── requirements-key-packages.txt # Python 後端核心套件清單
-├── scripts/                    # 資料處理、NER 解析與圖譜匯入腳本 (Python)
-│   ├── test_neo4j_connection.py# 測試 Neo4j 資料庫連線狀態
-│   ├── import_sample.py        # 匯入範例判決資料與建立向量索引
-│   ├── import_judgments.py     # 解析並匯入判決書的 NER 實體與關係
-│   ├── community_detection.py  # 執行社群偵測演算法進行圖譜聚類著色
-│   └── search_ui.py            # 本地端測試使用的 Gradio/Streamlit 搜尋介面
-├── frontend/                   # 全端 Next.js 前端應用
+├── package.json                # 根目錄指令代理設定 (NPM Scripts)
+├── frontend/                   # 全端 Next.js 前端應用與 TypeScript 腳本
 │   ├── src/
 │   │   ├── app/                # Next.js 頁面與 API 路由 (Serverless Route Handlers)
-│   │   └── components/         # React UI 元件與 vis-network 圖譜繪製元件
+│   │   ├── components/         # React UI 元件與 vis-network 圖譜繪製元件
+│   │   └── scripts/            # 重構後的資料處理、LPA 社群偵測與匯入腳本 (TypeScript)
+│   │       ├── test_neo4j_connection.ts # 測試 Neo4j 資料庫連線狀態
+│   │       ├── import_sample.ts   # 隨機按比例抽樣並匯入判決書資料
+│   │       ├── import_judgments.ts# 解析並匯入全量判決書的實體與關係
+│   │       ├── community_detection.ts # 本地 LPA 標籤傳播社群偵測演算法
+│   │       ├── update_embeddings.ts # 補全未向量化之 Chunks
+│   │       └── search_pipeline.ts # 命令行測試用混合搜尋 CLI
 │   ├── package.json            # 前端相依套件與指令設定
 │   └── tailwind.config.ts      # Tailwind CSS 樣式配置
 └── data/                       # 原始判決書資料存放目錄
@@ -104,41 +105,48 @@ flowchart TD
 ### 步驟 1：複製並設定環境變數
 在專案根目錄下複製環境變數範例：
 ```bash
-cp .env.example .env
-```
-編輯 `.env` 檔案，填入您的 **Neo4j AuraDB** 或本地 Neo4j 連線資訊，以及 **OpenAI API Key**。
-
-同時也需要在 `frontend/` 目錄下建立 `.env.local` 供 Next.js 讀取：
-```bash
 cp .env.example frontend/.env.local
 ```
+編輯 `frontend/.env.local` 檔案，填入您的 **Neo4j AuraDB** 連線資訊，以及 **OpenAI API Key**。
 
-### 步驟 2：初始化 Neo4j 與匯入資料 (Python)
-1. **安裝 Python 依賴套件**：
+### 步驟 2：安裝 Node 依賴套件
+在專案根目錄下，進入 `frontend` 目錄並安裝所有依賴（包含編譯與執行 TS 腳本需要的 `tsx` 和 `dotenv`）：
+```bash
+cd frontend
+npm install
+```
+
+### 步驟 3：初始化 Neo4j 與匯入資料 (TypeScript)
+您可以在專案**根目錄**直接執行以下代理指令（免去 `cd` 切換目錄）：
+
+1. **測試資料庫連線**：
    ```bash
-   pip install -r requirements-key-packages.txt
+   npm run db:connect-test
    ```
-2. **測試資料庫連線**：
+2. **執行資料抽樣與匯入 (預設抽樣 10,000 筆，並行度為 5)**：
    ```bash
-   python scripts/test_neo4j_connection.py
+   npm run db:import-sample
    ```
-3. **執行資料匯入與向量索引建立**：
+   *(您也可以限制只匯入前 5 筆進行快速測試：`npm run db:import-sample -- --limit 5`)*
+3. **執行 LPA 社群偵測著色**：
    ```bash
-   python scripts/import_sample.py
+   npm run db:community
+   ```
+4. **補全 Chunk 的向量 Embedding**：
+   ```bash
+   npm run db:update-embeddings
+   ```
+5. **資料庫數據統計驗證**：
+   ```bash
+   npm run db:verify
    ```
 
-### 步驟 3：啟動 Web 搜尋介面 (Next.js 前端)
-1. **進入前端目錄並安裝 Node 依賴**：
-   ```bash
-   cd frontend
-   npm install
-   ```
-2. **啟動開發伺服器**：
-   ```bash
-   npm run dev
-   ```
-3. **開啟瀏覽器**：
-   造訪 [http://localhost:3000](http://localhost:3000) 即可進入搜尋與視覺化圖譜系統。
+### 步驟 4：啟動 Web 搜尋介面 (Next.js 前端)
+在專案根目錄下直接執行：
+```bash
+npm run dev
+```
+造訪 [http://localhost:3000](http://localhost:3000) 即可進入搜尋與視覺化圖譜系統。
 
 ---
 

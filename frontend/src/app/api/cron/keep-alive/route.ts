@@ -1,0 +1,73 @@
+import { NextResponse } from 'next/server';
+import neo4j, { Driver } from 'neo4j-driver';
+
+// 宣告全域變數快取，防止 Serverless 冷啟動連線數溢出
+declare global {
+  var neo4jDriver: Driver | undefined;
+}
+
+// 獲取或建立 Neo4j 驅動實例
+function getNeo4jDriver(): Driver {
+  if (!globalThis.neo4jDriver) {
+    const uri = process.env.NEO4J_URI;
+    const user = process.env.NEO4J_USERNAME || 'neo4j';
+    const password = process.env.NEO4J_PASSWORD;
+
+    if (!uri || !password) {
+      throw new Error('缺少 Neo4j 連線環境變數！');
+    }
+
+    globalThis.neo4jDriver = neo4j.driver(uri, neo4j.auth.basic(user, password));
+  }
+  return globalThis.neo4jDriver;
+}
+
+export async function GET(request: Request) {
+  try {
+    // 1. 驗證 Vercel Cron 排程安全性金鑰
+    const authHeader = request.headers.get('authorization');
+    const cronSecret = process.env.CRON_SECRET;
+
+    // 僅在生產環境且有設定 CRON_SECRET 時進行強校驗，方便開發或本地手動測試
+    if (process.env.NODE_ENV === 'production' && cronSecret) {
+      if (authHeader !== `Bearer ${cronSecret}`) {
+        console.warn('[Cron Warning] 未授權的排程呼叫嘗試');
+        return new Response('Unauthorized', { status: 401 });
+      }
+    }
+
+    // 2. 連線 Neo4j 並執行寫入操作以重置 72 小時計時器
+    const driverInstance = getNeo4jDriver();
+    const session = driverInstance.session();
+
+    try {
+      const cypher = `
+        MERGE (h:Heartbeat {id: 'keep-alive'})
+        SET h.lastSeen = datetime()
+        RETURN h.lastSeen AS lastSeen
+      `;
+      
+      const res = await session.run(cypher);
+      const record = res.records[0];
+      const lastSeen = record ? record.get('lastSeen').toString() : null;
+
+      console.log(`[Cron Success] Neo4j 心跳寫入成功，目前時間: ${lastSeen}`);
+
+      return NextResponse.json({
+        success: true,
+        message: '心跳更新成功，資料庫已成功重置活躍計時器！',
+        lastSeen,
+      });
+
+    } finally {
+      await session.close();
+    }
+
+  } catch (error: any) {
+    console.error('[Cron Error] Keep-Alive 執行失敗:', error);
+    return NextResponse.json(
+      { error: error.message || '內部心跳寫入錯誤' },
+      { status: 500 }
+    );
+  }
+}

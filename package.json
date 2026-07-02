@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "台灣法律判決書 Graph RAG 搜尋系統",
   "scripts": {
+    "prepare": "husky",
     "db:connect-test": "npm run db:connect-test --prefix frontend",
     "db:import": "npm run db:import --prefix frontend",
     "db:import-sample": "npm run db:import-sample --prefix frontend",
@@ -13,5 +14,8 @@
     "dev": "npm run dev --prefix frontend",
     "build": "npm run build --prefix frontend",
     "start": "npm run start --prefix frontend"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
   }
 }

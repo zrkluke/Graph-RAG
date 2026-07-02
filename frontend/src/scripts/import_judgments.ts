@@ -280,7 +280,15 @@ export function getJsonFiles(dir: string): string[] {
   return results;
 }
 
-export async function import_judgments(data_dir: string, limit?: number) {
+export async function import_files(json_files: string[]) {
+  const PromiseWithTimeout = <T>(promise: Promise<T>, ms: number, errMsg: string): Promise<T> => {
+    let timeoutId: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(errMsg)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+  };
+
   const uri = process.env.NEO4J_URI;
   const username = process.env.NEO4J_USERNAME || 'neo4j';
   const password = process.env.NEO4J_PASSWORD;
@@ -308,143 +316,204 @@ export async function import_judgments(data_dir: string, limit?: number) {
     // 初始化資料庫索引與約束
     await init_db(driver);
     
-    // 2. 尋找所有判決書 JSON 檔案
-    let json_files = getJsonFiles(data_dir);
-    const total_files = json_files.length;
-    console.log(`找到 ${total_files} 筆判決書檔案。`);
-    
-    if (limit) {
-      json_files = json_files.slice(0, limit);
-      console.log(`已啟用限制：僅處理前 ${json_files.length} 筆檔案。`);
-    }
-        
     let success_count = 0;
     let error_count = 0;
-    
-    for (let idx = 0; idx < json_files.length; idx++) {
-      const file_path = json_files[idx];
+    let processed_count = 0;
+    const concurrency = 20;
+
+    console.log(`啟動高併發匯入 (併發數: ${concurrency}，重用連線會話)...`);
+    const startTime = Date.now();
+
+    /**
+     * runWorker: 獨立的併發寫入工作者
+     * 
+     * 為了大幅提升連線至雲端 Neo4j AuraDB (Bolt over TLS) 的匯入效能，本架構引入了以下優化機制：
+     * 1. 【高併發 (High Concurrency)】: 建立 20 組並行 Worker，利用非同步 Promise 滑動窗口動態消化檔案隊列，隱藏公網 RTT 網路延遲。
+     * 2. 【會話重用 (Connection/Session Reuse)】: 每個 Worker 重複使用同一個 Session 進行 executeWrite，避免每筆資料開關會話所產生的 TCP & TLS 握手延遲。
+     * 3. 【超時防掛起 (Write Timeout Protection)】: 寫入操作強制加上 10 秒的 Timeout。當遭遇公網靜默斷線 (Silent Connection Drop) 時，可主動中斷 hanging 狀態，拋出超時異常。
+     * 4. 【斷線自動重建 (Auto-Reconnect)】: 捕獲 ECONNRESET、Failed to connect 或 Timeout 等連線崩潰錯誤時，主動釋放並丟棄損壞的舊會話，重新建立全新 Session 並重新寫入該筆資料。
+     * 5. 【死結自動重試 (Deadlock Self-Healing)】: 併發寫入熱點節點 (例如熱門法條、法官姓名) 導致資料庫鎖定死結時，自動延遲 500ms 後重試 (最多 3 次)，免除不必要的匯入失敗。
+     */
+    /**
+     * import_single_file: 獨立處理單個判決書檔案並寫入 Neo4j
+     */
+    const import_single_file = async (file_path: string, currentSession: any): Promise<void> => {
       const parent_folder = path.basename(path.dirname(file_path));
       
       // 解析法院資訊與案件種類
       const court_info = parse_court_from_folder(parent_folder);
       if (!court_info) {
-        console.log(`[${idx + 1}/${json_files.length}] 警告：無法解析資料夾名稱 '${parent_folder}'，略過。`);
-        error_count++;
-        continue;
+        throw new Error(`無法解析資料夾名稱 '${parent_folder}'`);
       }
           
-      try {
-        const file_content = fs.readFileSync(file_path, 'utf8');
-        const data = JSON.parse(file_content);
-        
-        const jid = data.JID;
-        const jdate = data.JDATE || '';
-        const jtitle = data.JTITLE || '';
-        const jfull = data.JFULL || '';
-        
-        if (!jid || !jfull) {
-          console.log(`[${idx + 1}/${json_files.length}] 警告：檔案缺少 JID 或 JFULL，略過。`);
-          error_count++;
-          continue;
+      const file_content = fs.readFileSync(file_path, 'utf8');
+      const data = JSON.parse(file_content);
+      
+      const jid = data.JID;
+      const jdate = data.JDATE || '';
+      const jtitle = data.JTITLE || '';
+      const jfull = data.JFULL || '';
+      
+      if (!jid || !jfull) {
+        throw new Error(`檔案缺少 JID 或 JFULL`);
+      }
+      
+      // 清洗與轉換
+      const clean_text = clean_judgment_text(jfull);
+      
+      // 抽取法條與關係人
+      const extracted_stats = extract_statutes(clean_text);
+      let laws_list = extracted_stats.map(s => `${s.law}第${s.article}條${s.sub}`);
+      laws_list = Array.from(new Set(laws_list));
+      
+      const parties = extract_parties_and_judges(jfull);
+      
+      // 格式化日期為 YYYY-MM-DD
+      let date_str: string | null = null;
+      if (jdate.length === 8) {
+        date_str = `${jdate.substring(0, 4)}-${jdate.substring(4, 6)}-${jdate.substring(6, 8)}`;
+      }
+      
+      // 分離「主文」與「事實及理由」
+      let main_text = "";
+      let fact_reason = clean_text;
+      
+      const split_patterns = [/事實及理由\r?\n/, /事實\r?\n/, /理　由\r?\n/, /理由\r?\n/];
+      for (const p of split_patterns) {
+        const parts = clean_text.split(p);
+        if (parts.length >= 2) {
+          main_text = parts[0].trim();
+          fact_reason = parts.slice(1).join('\n').trim();
+          break;
         }
+      }
+      
+      if (!main_text) {
+        main_text = jtitle;  // fallback
+      }
+      
+      // 進行 Section 段落切分
+      const sections_list = split_judgment_into_sections(court_info.case_type || '其他', fact_reason);
+      const formatted_sections: any[] = [];
+      const formatted_chunks: any[] = [];
+      
+      for (const sec of sections_list) {
+        const sec_id = `${jid}_sec_${sec.index}`;
+        formatted_sections.push({
+          id: sec_id,
+          index: sec.index,
+          role: sec.role,
+          type: sec.type,
+          text: sec.text
+        });
         
-        // 清洗與轉換
-        const clean_text = clean_judgment_text(jfull);
-        
-        // 抽取法條與關係人
-        const extracted_stats = extract_statutes(clean_text);
-        let laws_list = extracted_stats.map(s => `${s.law}第${s.article}條${s.sub}`);
-        laws_list = Array.from(new Set(laws_list));
-        
-        const parties = extract_parties_and_judges(jfull);
-        
-        // 格式化日期為 YYYY-MM-DD
-        let date_str: string | null = null;
-        if (jdate.length === 8) {
-          date_str = `${jdate.substring(0, 4)}-${jdate.substring(4, 6)}-${jdate.substring(6, 8)}`;
-        }
-        
-        // 分離「主文」與「事實及理由」
-        let main_text = "";
-        let fact_reason = clean_text;
-        
-        const split_patterns = [/事實及理由\r?\n/, /事實\r?\n/, /理　由\r?\n/, /理由\r?\n/];
-        for (const p of split_patterns) {
-          const parts = clean_text.split(p);
-          if (parts.length >= 2) {
-            main_text = parts[0].trim();
-            fact_reason = parts.slice(1).join('\n').trim();
-            break;
-          }
-        }
-        
-        if (!main_text) {
-          main_text = jtitle;  // fallback
-        }
-        
-        // 進行 Section 段落切分
-        const sections_list = split_judgment_into_sections(court_info.case_type || '其他', fact_reason);
-        const formatted_sections: any[] = [];
-        const formatted_chunks: any[] = [];
-        
-        for (const sec of sections_list) {
-          const sec_id = `${jid}_sec_${sec.index}`;
-          formatted_sections.push({
-            id: sec_id,
-            index: sec.index,
-            role: sec.role,
-            type: sec.type,
-            text: sec.text
+        // 處理 Section 底下的 Chunks
+        const chunks_list = sec.chunks || [];
+        for (let chk_idx = 0; chk_idx < chunks_list.length; chk_idx++) {
+          formatted_chunks.push({
+            id: `${sec_id}_chk_${chk_idx + 1}`,
+            section_id: sec_id,
+            index: chk_idx + 1,
+            text: chunks_list[chk_idx]
           });
-          
-          // 處理 Section 底下的 Chunks
-          const chunks_list = sec.chunks || [];
-          for (let chk_idx = 0; chk_idx < chunks_list.length; chk_idx++) {
-            formatted_chunks.push({
-              id: `${sec_id}_chk_${chk_idx + 1}`,
-              section_id: sec_id,
-              index: chk_idx + 1,
-              text: chunks_list[chk_idx]
-            });
+        }
+      }
+
+      const import_data = {
+        judgment: {
+          id: jid,
+          case_type: court_info.case_type,
+          court: court_info.unit_norm,
+          court_level: court_info.court_root_norm,
+          date: date_str,
+          reason: jtitle,
+          main_text: main_text,
+          fact_reason: fact_reason
+        },
+        sections: formatted_sections,
+        chunks: formatted_chunks,
+        laws: laws_list,
+        parties: parties
+      };
+      
+      // 寫入 Neo4j
+      await currentSession.executeWrite((tx: any) => write_to_neo4j(tx, import_data));
+    };
+
+    const runWorker = async (workerId: number) => {
+      let session = driver.session();
+      try {
+        while (true) {
+          const idx = processed_count++;
+          if (idx >= json_files.length) break;
+
+          const file_path = json_files[idx];
+          let retryCount = 0;
+          const maxRetries = 3;
+          let success = false;
+
+          while (retryCount < maxRetries && !success) {
+            try {
+              // 寫入 Neo4j (重用 session，加上 10 秒超時以防止靜默連線斷開引發掛起)
+              await PromiseWithTimeout(
+                import_single_file(file_path, session),
+                10000,
+                'Neo4j write timeout (ECONNRESET or network hang)'
+              );
+              success_count++;
+              success = true;
+
+              const current_processed = success_count + error_count;
+              if (current_processed % 100 === 0 || current_processed === json_files.length) {
+                console.log(`[進度] 已處理 ${current_processed} / ${json_files.length} 筆判決書... (成功: ${success_count}, 失敗: ${error_count})`);
+              }
+            } catch (ex: any) {
+              const errMsg = ex.message || '';
+              const isConnectionError = errMsg.includes('Failed to connect') || 
+                                        errMsg.includes('ECONNRESET') || 
+                                        errMsg.includes('connection') ||
+                                        errMsg.includes('timeout');
+              const isDeadlock = errMsg.toLowerCase().includes('deadlock');
+              const isUnrecoverable = errMsg.includes('無法解析資料夾名稱') || errMsg.includes('檔案缺少 JID');
+
+              if (isUnrecoverable) {
+                console.log(`[錯誤] 匯入檔案 '${path.basename(file_path)}' 失敗: ${errMsg}`);
+                error_count++;
+                success = true; // 直接標記為結束，不重試
+              } else if (isConnectionError) {
+                console.log(`[連線重置] 偵測到 Neo4j 連線中斷或超時，正在重新建立會話並重試: ${path.basename(file_path)} (重試次數: ${retryCount + 1})`);
+                try { await session.close(); } catch (e) {}
+                session = driver.session();
+                retryCount++;
+                await new Promise(r => setTimeout(r, 1000)); // 等待 1 秒後重試
+              } else if (isDeadlock) {
+                retryCount++;
+                console.log(`[死結衝突] 偵測到資料庫寫入鎖定死結，將在 500ms 後重試: ${path.basename(file_path)} (重試次數: ${retryCount})`);
+                await new Promise(r => setTimeout(r, 500)); // 等待 0.5 秒後重試
+              } else {
+                console.log(`[錯誤] 匯入檔案 '${path.basename(file_path)}' 失敗: ${ex}`);
+                error_count++;
+                success = true; // 其他非暫時性錯誤，跳過不重試
+              }
+            }
+          }
+
+          if (!success) {
+            console.log(`[嚴重錯誤] 檔案 '${path.basename(file_path)}' 於重試 ${maxRetries} 次後依然失敗，跳過。`);
+            error_count++;
           }
         }
-
-        const import_data = {
-          judgment: {
-            id: jid,
-            case_type: court_info.case_type,
-            court: court_info.unit_norm,
-            court_level: court_info.court_root_norm,
-            date: date_str,
-            reason: jtitle,
-            main_text: main_text,
-            fact_reason: fact_reason
-          },
-          sections: formatted_sections,
-          chunks: formatted_chunks,
-          laws: laws_list,
-          parties: parties
-        };
-        
-        // 寫入 Neo4j
-        const session = driver.session();
-        try {
-          await session.executeWrite(tx => write_to_neo4j(tx, import_data));
-        } finally {
-          await session.close();
-        }
-            
-        success_count++;
-        if ((idx + 1) % 5 === 0 || (idx + 1) === json_files.length) {
-          console.log(`[${idx + 1}/${json_files.length}] 成功匯入 JID: {${jid}}`);
-        }
-      } catch (ex) {
-        console.log(`[${idx + 1}/${json_files.length}] [錯誤] 匯入檔案 '${path.basename(file_path)}' 失敗: ${ex}`);
-        error_count++;
+      } finally {
+        await session.close();
       }
-    }
-    
-    console.log(`\n[匯入完成] 成功：${success_count} 筆，失敗：${error_count} 筆。`);
+    };
+
+    const workers = Array.from({ length: concurrency }, (_, i) => runWorker(i));
+    await Promise.all(workers);
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`\n[匯入完成] 共耗時 ${duration} 秒。成功：${success_count} 筆，失敗：${error_count} 筆。`);
+    return { success_count, error_count };
   } finally {
     if (driver) {
       await driver.close();
@@ -453,11 +522,25 @@ export async function import_judgments(data_dir: string, limit?: number) {
   }
 }
 
+export async function import_judgments(data_dir: string, limit?: number) {
+  let json_files = getJsonFiles(data_dir);
+  const total_files = json_files.length;
+  console.log(`找到 ${total_files} 筆判決書檔案。`);
+  
+  if (limit) {
+    json_files = json_files.slice(0, limit);
+    console.log(`已啟用限制：僅處理前 ${json_files.length} 筆檔案。`);
+  }
+  
+  return await import_files(json_files);
+}
+
 // CLI 執行處理
 if (require.main === module) {
   const args = process.argv.slice(2);
   let dataDir = 'data/202604';
   let limit: number | undefined;
+  let onlyAccidents = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' && args[i + 1]) {
@@ -466,10 +549,45 @@ if (require.main === module) {
     } else if (args[i] === '--limit' && args[i + 1]) {
       limit = parseInt(args[i + 1]);
       i++;
+    } else if (args[i] === '--only-accidents') {
+      onlyAccidents = true;
     }
   }
 
-  import_judgments(dataDir, limit).catch(err => {
+  const runImport = async () => {
+    let json_files = getJsonFiles(dataDir);
+    
+    if (onlyAccidents) {
+      console.log("正在快速過濾車禍相關案件...");
+      const accidentRegex = /(車禍|交通事故|追撞|擦撞|對撞|兩車碰撞|交通意外)/;
+      const matched_files: string[] = [];
+      
+      const chunk_size = 500;
+      for (let i = 0; i < json_files.length; i += chunk_size) {
+        const batch = json_files.slice(i, i + chunk_size);
+        await Promise.all(batch.map(async file => {
+          try {
+            const content = await fs.promises.readFile(file, 'utf8');
+            if (accidentRegex.test(content)) {
+              matched_files.push(file);
+            }
+          } catch (e) {}
+        }));
+      }
+      
+      json_files = matched_files;
+      console.log(`過濾完成！符合車禍條件的案件共 ${json_files.length} 筆。`);
+    }
+    
+    if (limit) {
+      json_files = json_files.slice(0, limit);
+      console.log(`已啟用限制：僅處理前 ${json_files.length} 筆檔案。`);
+    }
+    
+    await import_files(json_files);
+  };
+
+  runImport().catch(err => {
     console.error('執行匯入出錯：', err);
   });
 }

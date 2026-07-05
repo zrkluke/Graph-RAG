@@ -18,3 +18,11 @@ services:
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
       - NEO4J_dbms_security_procedures_allowlist=apoc.*
     restart: always
+
+  redis:
+    image: redis:7-alpine
+    container_name: local-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass localredispassword --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly no
+    restart: always

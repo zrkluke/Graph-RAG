@@ -8,21 +8,25 @@
 
 ### 1.1 目標
 建構一個 **智慧型法律判決書搜尋與圖譜分析系統**：
-1. **資料處理**：從司法院 OpenData 擷取判決書文本，利用命名實體識別 (NER) 與關聯抽取，將判決書中的重要實體（如被告、原告、法官、引用法條、罪名等）擷取出來，以知識圖譜的形式寫入 Neo4j。
-2. **語義與篩選搜尋**：使用者輸入一段「自然語言情境描述」（例如：「被告酒後騎車撞傷行人並逃逸」），系統將進行語義相似度比對，結合圖譜關聯進行檢索，由高到低排序最相似的判決書。同時支援以「法院層級」（最高法院、高等法院、地方法院）等多重條件進行篩選。
+1. **資料處理**：從司法院 OpenData 擷取判決書文本。進行雙寫導入：
+   * **PostgreSQL (Supabase)**：儲存判決書全文、段落結構（Sections）與文字切片（Chunks），並對切片進行向量化。
+   * **Neo4j**：抽取關鍵實體（如被告、原告、法官、引用法條、罪名、關鍵事證）並寫入關聯邊，僅保留輕量化判決書 ID 骨架。
+2. **語義與篩選搜尋**：使用者輸入一段「自然語言情境描述」，系統透過 Postgres 進行向量與三連字元全文混合檢索，並送至 Neo4j 進行實體關係（法官、法規等）硬約束過濾與多跳案例推薦，最後在記憶體進行 RRF 分數融合與長文本裝配。
 
 ### 1.2 技術限制與省錢策略（Free Tier 部署計畫）
-為達成「最低成本」甚至「完全免費」的部署需求，我們採用以下省錢且高效的雲端架構：
+為達成「最低成本」甚至「完全免費」的部署需求，我們採用 **「圖文分離 (Polyglot Decoupling)」** 雙資料庫架構：
 
-1. **圖資料庫 (Database)**: 
-   * **Neo4j AuraDB Free**（官方雲端託管免費版）：提供 1 個免費圖資料庫實例（支援最多 200,000 個節點與 400,000 條關係），完全免信用卡、免維護費，效能優異，極適合開發與中小型應用。
-2. **Web 應用程式與 API (Backend & Frontend)**:
-   * **Vercel (Next.js)**：使用 Next.js 進行全棧式開發。
-   * **優勢**：Vercel 的免費額度非常慷慨，且支援 **Serverless Route Handlers**（路由處理器）。我們可以直接在 Next.js 的 API 路由中使用 TypeScript/JavaScript 的 `neo4j-driver` 與 `langchain` 直接連接 Neo4j AuraDB，**完全不需要另外花錢租用獨立的 Python FastAPI 後端伺服器**，從而實現 **0 元部署**！
-3. **LLM 與 Embedding API**:
-   * 使用 OpenAI API 或其他相容的免費/低成本 LLM 服務。
-4. **Redis 快取層 (Cache)**:
-   * **Upstash Redis** (免費版)：提供雲端 Redis 快取。在 Next.js API 路由中配置 Redis，以查詢參數 MD5 雜湊值為 Key，緩存搜尋結果（TTL 3 天），大幅降低 OpenAI Embedding 的 Token 消耗與 Neo4j 的查詢壓力。
+1. **圖資料庫 (Neo4j AuraDB Free)**: 
+   * 免費版限制最多 200,000 個節點與 400,000 條關係。
+   * **圖文分離設計**：完全刪除 Neo4j 中的 `Section` 與 `Chunk` 節點，並抽離長文字與 1536 維向量屬性。這讓 10 萬筆判決在 Neo4j 中僅耗用數萬節點，**徹底解決免費版容量上限**！
+2. **關係與向量資料庫 (Supabase PostgreSQL)**:
+   * 提供免費版 PostgreSQL 資料庫。
+   * 啟用 **`pgvector`** 插件進行 chunks 向量儲存與 HNSW Cosine 相似度快速檢索。
+   * 啟用 **`pg_trgm`** (Trigram) 擴充以建立三連字元 GIN 索引，為中文模糊 ILIKE 檢索提供免分詞器的毫秒級索引加速。
+3. **Web 應用程式與 API (Vercel Next.js)**:
+   * 使用 Next.js 的 Serverless Route Handlers 直接連接 Postgres 與 Neo4j AuraDB，實現 0 元部署。
+4. **Redis 快取層 (Upstash Redis)**:
+   * 緩存搜尋結果（TTL 3 天），大幅降低 OpenAI Embedding 的 Token 消耗。
 
 ---
 
@@ -41,88 +45,95 @@
               │  ┌─────────────────┐    ┌─────────────┐  ┌──────────┐  │
               │  │ Next.js API 路由│───▶│ OpenAI API  │  │ Upstash  │  │
               │  │ (Serverless API)│    │ (Embedding) │  │  Redis   │  │
-              │  └────────┬────────┘    └─────────────┘  └────┬─────┘  │
-              └───────────┼───────────────────────────────────┼────────┘
-                          │ (Bolt over TLS)                   │ (Cache Hit/Miss)
-                          ▼                                   ▼
+              │  └────┬────────┬───┘    └─────────────┘  └────┬─────┘  │
+              └───────┼────────┼──────────────────────────────┼────────┘
+                      │        │ (Bolt over TLS)              │ (Cache Hit/Miss)
+     (SQL / pgvector) │        ▼                              ▼
+                      │  ┌─────────────────────────────────────────────┐
+                      │  │              Neo4j AuraDB Free              │
+                      │  │                                             │
+                      │  │  • Judgment (僅保留ID等Metadata骨架)         │
+                      │  │  • Entity (被告/原告/法官/法條/罪名/事證)   │
+                      │  │  • No Section or Chunk Nodes                │
+                      │  └─────────────────────────────────────────────┘
+                      ▼
               ┌────────────────────────────────────────────────────────┐
-              │                   Neo4j AuraDB Free                    │
+              │                   Supabase Postgres                    │
               │                                                        │
-              │  • Document (判決書)                                   │
-              │  • Entity (被告/法官/法條)                             │
-              │  • Vector Index (向量搜尋)                              │
+              │  • judgments 表 (儲存 main_text、fact_reason 全文)       │
+              │  • sections 表  (段落結構)                             │
+              │  • chunks 表    (文字切片與 1536維 pgvector 向量)      │
               └────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 圖譜資料模型設計 (Neo4j Schema)
+## 3. 資料庫 Schema 設計
 
-### 3.1 節點類型 (Node Labels)
-1. **`Judgment` (判決書)**:
-   * `id`: `String` (判決字號/系統ID)
-   * `court`: `String` (法院名稱，如：臺灣台北地方法院、最高法院)
-   * `court_level`: `String` (法院層級，如：地方法院、高等法院、最高法院)
-   * `date`: `Date` (判決日期)
-   * `reason`: `String` (案由)
-   * `main_text`: `String` (主文)
-   * `fact_reason`: `String` (事實及理由全文)
-   * `embedding`: `Vector` (事實及理由之向量嵌入，用於語義檢索)
-2. **`Entity` (重要實體，採用多重標籤繼承細分類)**:
-   * **`Person`**: 如被告、原告、證人、律師、法官。
-   * **`Law` (法條)**: 引用法條，如 `中華民國刑法第185-3條`。
-   * **`Crime` (罪名)**: 案情涉及的具體罪名，如 `公共危險罪`、`過失傷害罪`。
-   * **`Item` (關鍵事證)**: 犯罪工具、涉案物品等。
+### 3.1 PostgreSQL 實體表與索引
+1. **`judgments` (主表)**:
+   * `id`: `VARCHAR(100) PRIMARY KEY` (判決字號)
+   * `court`, `court_level`, `case_type`, `date`, `reason`
+   * `main_text`, `fact_reason` (長文本全文)
+   * *索引*：對 `main_text` 與 `fact_reason` 建立 `gin_trgm_ops` 索引以提供 GIN 全文模糊檢索加速。
+2. **`sections` (段落表)**:
+   * `id` (`PRIMARY KEY`), `judgment_id` (`FOREIGN KEY`), `index`, `role`, `type`, `text`
+3. **`chunks` (切片表)**:
+   * `id` (`PRIMARY KEY`), `judgment_id` (`FOREIGN KEY`), `section_id` (`FOREIGN KEY`), `index`, `text`
+   * `embedding`: `VECTOR(1536)`
+   * *索引*：建立 `hnsw` 索引搭配 `vector_cosine_ops` 進行向量快速查詢。
 
-### 3.2 關係類型 (Relationship Types)
-* `(:Judgment)-[:JUDGED_BY]->(:Person {role: "法官"})` (裁判法官)
-* `(:Judgment)-[:PLAINTIFF]->(:Person {role: "原告"})` (原告人)
-* `(:Judgment)-[:DEFENDANT]->(:Person {role: "被告"})` (被告人)
-* `(:Judgment)-[:CITED]->(:Law)` (引用法條)
-* `(:Judgment)-[:CHARGED_WITH]->(:Crime)` (涉及罪名)
-* `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)` (基於向量相似度建立的判決關聯)
+### 3.2 Neo4j 圖譜節點與關係
+1. **`Judgment` (判決骨架)**:
+   * `id`: `String` (PK)
+   * `court`, `court_level`, `case_type`, `date`, `reason` (無長文本，無向量屬性)
+2. **`Entity` (關聯實體)**:
+   * **`Person`**: 法官、原告、被告、訴訟代理人。
+   * **`Law`**: 引用法條，如 `中華民國刑法第185-3條`。
+   * **`Crime` (罪名)**: 如 `公共危險`、`過失傷害`。
+   * **`Item` (關鍵事證)**: 如 `呼氣酒精濃度`、`安非他命`、`西瓜刀`。
+3. **關係線**:
+   * `(:Judgment)-[:JUDGED_BY]->(:Person)` (裁判法官)
+   * `(:Judgment)-[:DEFENDANT]->(:Person)` (被告人)
+   * `(:Judgment)-[:CITED]->(:Law)` (引用法條)
+   * `(:Judgment)-[:CHARGED_WITH]->(:Crime)` (涉及罪名)
+   * `(:Judgment)-[:FOUND_WITH]->(:Item)` (涉及關鍵事證)
+   * `(:Judgment)-[:SIMILAR_TO {score: Float}]->(:Judgment)` (共享法規二跳推薦關係)
 
 ---
 
 ## 4. 搜尋與檢索演算法 (Search Pipeline)
 
-1. **快取檢索與雜湊**：
-   * 使用者輸入 `query`、`courtLevel`、`caseType`、`court`、`judge`、`citedLaw`、`limit` 等搜尋參數。
-   * API 先對這些參數的 JSON 字串計算 MD5 雜湊作為 Redis Cache Key。
-   * **快取命中 (Cache Hit)**：若 Redis 中存在該 Key，直接讀取並回傳，不向 OpenAI 或 Neo4j 發送請求。
-   * **快取未命中 (Cache Miss)**：執行下方 2-5 步，並在成功後寫入 Redis（TTL 3 天）。
-2. **向量化**：透過 OpenAI Embedding 將情境描述轉換為 1536 維向量。
-3. **混合檢索 (Hybrid Search & Graph Query)**：
-   * **步驟 1**：在 Neo4j 中利用 Vector Index（對 `embedding` 屬性）與 Fulltext Index 進行雙管道候選檢索。
-   * **步驟 2**：在 Cypher 語句中同時套用軟/硬篩選過濾器：
-     * `court_level` 與 `case_type` 的值篩選。
-     * **硬過濾條件**：指定法院 (`j.court = $court`)，以及法官與法規的關係硬過濾（使用 `EXISTS { (j)-[:JUDGED_BY]->(:Person {name: $judge}) }` 與 `EXISTS { (j)-[:CITED]->(:Law {name: $citedLaw}) }`）。
-   * **步驟 3**：提取出最相似的 `Judgment` 節點，並在 Node.js 中計算混合 RRF (Reciprocal Rank Fusion) 評分進行融合排序。
-4. **社群語意命名與詳情裝配**：
-   * 批次撈取相似判決書詳情前，執行全域聚合查詢，計算各 Leiden 社群最常引用的前兩名法規：
-     `MATCH (j:Judgment)-[:CITED]->(l:Law) WHERE j.community IS NOT NULL RETURN j.community, l.name, count(j)`。
-   * 動態產生語意化分群名稱，如 `法律分群 1 (主要引用：刑法第185-3條)`。
-   * 撈取判決書的一跳關聯實體（法官、被告、原告、引用法規），並裝配回三欄結果回傳。
+1. **快取檢索與雜湊**：對前端傳參的 JSON 計算 MD5，命中 Redis 則直接回傳（TTL 3 天）。
+2. **向量化**：將情境 Query 透過 OpenAI 轉換為 1536 維向量。
+3. **分散式雙庫聯合查詢 (Orchestration)**：
+   * **第一步：並行 Postgres 檢索**：
+     * **向量檢索**：向 Postgres `chunks` 表以 HNSW 索引查詢 Cosine 相似度最高的 50 筆 `judgment_id`。
+     * **全文檢索**：向 Postgres `judgments` 表以三連字元 GIN 索引或 `websearch_to_tsquery` 檢索最相符的 50 筆 `judgment_id`。
+     * **硬過濾前置**：法院層級、案件種類、指定法院直接在 SQL 中執行過濾。
+   * **第二步：Node.js 中進行 RRF 融合排序**：
+     * 對兩大管道候選集進行 Reciprocal Rank Fusion，平滑常數經評測以 **`k=10`** 為最佳調優參數。
+   * **第三步：並行關係過濾與詳情撈取**：
+     * 將 RRF 排序後的前 N 筆 IDs 分送：
+       * **Neo4j**：進行法官、法規強過濾約束，並撈取一跳關聯實體、二跳推薦相似案件與 Leiden 社群命名。
+       * **Postgres**：執行 `WHERE id = ANY($1)` 一次性撈取對應判決的主文與事實理由全文。
+     * **記憶體裝配**：將兩邊資料在 Node.js 中合併組裝回傳。
 
 ---
 
 ## 5. 圖譜非同步展開與懶加載 (Graph Expansion)
 
-為了解決大量資料庫節點一次性加載帶來的瀏覽器卡頓，系統設計了非同步圖譜懶加載機制：
-1. **二跳擴展 API (`/api/graph/expand`)**：
-   * **法條節點 (`law`)**：雙擊展開引用了該法規的最新的 8 筆判決書。
-   * **人物節點 (`person`)**：雙擊展開與該法官或當事人相關聯的最新的 8 筆判決書。
-   * **判決書節點 (`judgment`)**：雙擊展開與該判決書共享最多引用法規的最相似 5 筆判決書（SIMILAR_TO 關係，二跳推薦）。
-2. **前端資料狀態管理**：
-   * 前端 `GraphNetwork.tsx` 使用 `vis-network` 的 `DataSet` 管理 `nodes` 與 `edges`，雙擊時調用展開 API 獲取鄰接節點與關係，利用 `DataSet.add` 動態增量寫入並去重，維持節點位置以防圖譜重繪，並帶有流暢的動態引力發散動畫。
+* **二跳擴展 API (`/api/graph/expand`)**：
+  * **法條節點 (`law`)**：雙擊展開引用了該法規的最新的 8 筆判決書。
+  * **人物節點 (`person`)**：雙擊展開與該法官或當事人相關聯的最新的 8 筆判決書。
+  * **判決書節點 (`judgment`)**：雙擊展開與該判決書共享最多引用法規的最相似 5 筆判決書（SIMILAR_TO 關係，二跳推薦）。
+* 前端 `GraphNetwork.tsx` 使用 `vis-network` 的 `DataSet` 管理 `nodes` 與 `edges`，雙擊時調用展開 API 獲取鄰接節點與關係，利用 `DataSet.add` 動態增量寫入並去重。
 
 ---
 
 ## 6. 開發指南與階段任務
 
 作為開發代理人，在接續的工作中請遵守：
-1. **以 `openspec` 驅動與平台雙向同步**：進行任何 API 實作、圖譜解析或重大代碼重構前，AI 助理必須同時：
-   * 在平台指定的路徑建立並維護 `implementation_plan.md`（以通過 AI 平台 UI 的審查解鎖）。
-   * 在 `openspec/changes/<change-name>/` 底下建立對應的 `proposal.md`、`design.md` 與 `tasks.md`（以維持專案永久技術規格的完整性與版控）。
-2. **語系規範**：本專案的所有代碼註解、說明、終端輸出與前端 UI，**一律採用繁體中文 (Traditional Chinese)**。
-3. **模組化**：資料解析、清洗與匯入腳本放在 `frontend/src/scripts/`，Next.js App 結構則放在 `frontend/` 目錄中。
+1. **規格與實作計畫雙向同步**：進行重大代碼重構前，先維護好專案 OpenSpec 規格，並於變更完成後手動將專案變更目錄歸檔至 `openspec/changes/archive/`。
+2. **評測基準 (Recall@K)**：評估檢索演算法時，請一律使用標準資訊檢索指標 **`Recall@3`** 與 **`Recall@5`**。
+3. **語系規範**：本專案的所有代碼註解、說明、終端輸出與前端 UI，一律採用繁體中文 (Traditional Chinese)。

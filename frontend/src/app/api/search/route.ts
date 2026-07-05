@@ -56,7 +56,7 @@ export async function POST(request: Request) {
   try {
     // 1. 解析前端 Body 傳參
     const body = await request.json().catch(() => ({}));
-    const { query, courtLevel, caseType, limit = 3 } = body;
+    const { query, courtLevel, caseType, limit = 3, court = '', judge = '', citedLaw = '' } = body;
 
     if (!query || typeof query !== 'string' || !query.trim()) {
       return NextResponse.json({ error: '請提供有效的案情情境描述！' }, { status: 400 });
@@ -65,7 +65,7 @@ export async function POST(request: Request) {
     // 嘗試從 Redis 讀取快取
     if (useRedis && redisClient) {
       try {
-        const rawKey = JSON.stringify({ query, courtLevel, caseType, limit });
+        const rawKey = JSON.stringify({ query, courtLevel, caseType, limit, court, judge, citedLaw });
         const hash = crypto.createHash('md5').update(rawKey).digest('hex');
         cacheKey = `search:cache:${hash}`;
 
@@ -107,6 +107,9 @@ export async function POST(request: Request) {
           YIELD node AS j, score
           WHERE ($courtLevel IS NULL OR j.court_level = $courtLevel)
             AND ($caseType IS NULL OR j.case_type = $caseType)
+            AND ($court IS NULL OR j.court = $court)
+            AND ($judge IS NULL OR EXISTS { (j)-[:JUDGED_BY]->(:Person {name: $judge}) })
+            AND ($citedLaw IS NULL OR EXISTS { (j)-[:CITED]->(:Law {name: $citedLaw}) })
           RETURN j.id AS id, score AS score
           ORDER BY score DESC
           LIMIT 50
@@ -115,6 +118,9 @@ export async function POST(request: Request) {
           query,
           courtLevel: courtLevel && courtLevel !== '全部' ? courtLevel : null,
           caseType: caseType && caseType !== '全部' ? caseType : null,
+          court: court && court.trim() !== '' ? court.trim() : null,
+          judge: judge && judge.trim() !== '' ? judge.trim() : null,
+          citedLaw: citedLaw && citedLaw.trim() !== '' ? citedLaw.trim() : null,
         });
         const tEnd = performance.now();
         return { 
@@ -137,6 +143,9 @@ export async function POST(request: Request) {
           MATCH (j:Judgment)-[:HAS_SECTION]->(s)
           WHERE ($courtLevel IS NULL OR j.court_level = $courtLevel)
             AND ($caseType IS NULL OR j.case_type = $caseType)
+            AND ($court IS NULL OR j.court = $court)
+            AND ($judge IS NULL OR EXISTS { (j)-[:JUDGED_BY]->(:Person {name: $judge}) })
+            AND ($citedLaw IS NULL OR EXISTS { (j)-[:CITED]->(:Law {name: $citedLaw}) })
           RETURN j.id AS id, max(score) AS score
           ORDER BY score DESC
           LIMIT 50
@@ -145,6 +154,9 @@ export async function POST(request: Request) {
           queryVector,
           courtLevel: courtLevel && courtLevel !== '全部' ? courtLevel : null,
           caseType: caseType && caseType !== '全部' ? caseType : null,
+          court: court && court.trim() !== '' ? court.trim() : null,
+          judge: judge && judge.trim() !== '' ? judge.trim() : null,
+          citedLaw: citedLaw && citedLaw.trim() !== '' ? citedLaw.trim() : null,
         });
         const tEnd = performance.now();
         return { 
@@ -204,6 +216,37 @@ export async function POST(request: Request) {
     // 5. 【第三步：批次撈取目標 ID 的詳情、實體與相似案例推薦】
     const detailsMap = new Map<string, any>();
     
+    // 一次性統計各社群最常引用的法規，用於動態語意命名
+    const commNameMap = new Map<number, string>();
+    const sessionComm = driverInstance.session();
+    try {
+      const commCypher = `
+        MATCH (j:Judgment)-[:CITED]->(l:Law)
+        WHERE j.community IS NOT NULL
+        RETURN j.community AS comm_id, l.name AS law_name, count(j) AS usage_count
+        ORDER BY j.community, usage_count DESC
+      `;
+      const commRes = await sessionComm.run(commCypher);
+      const commGroups = new Map<number, string[]>();
+      commRes.records.forEach(rec => {
+        const cid = toJSNumber(rec.get('comm_id'));
+        const law = rec.get('law_name') as string;
+        const list = commGroups.get(cid) || [];
+        if (list.length < 2) {
+          const shortLaw = law.replace(/^中華民國/, '');
+          list.push(shortLaw);
+          commGroups.set(cid, list);
+        }
+      });
+      commGroups.forEach((laws, cid) => {
+        commNameMap.set(cid, `法律分群 ${cid} (主要引用：${laws.join('、')})`);
+      });
+    } catch (commError) {
+      console.error('❌ [社群命名統計失敗]:', commError);
+    } finally {
+      await sessionComm.close();
+    }
+
     if (allTargetIds.length > 0) {
       const session = driverInstance.session();
       try {
@@ -271,6 +314,7 @@ export async function POST(request: Request) {
             mainText: rec.get('main_text'),
             factReason: rec.get('fact_reason'),
             community: rec.get('community') !== null && rec.get('community') !== undefined ? toJSNumber(rec.get('community')) : null,
+            communityName: rec.get('community') !== null && rec.get('community') !== undefined ? (commNameMap.get(toJSNumber(rec.get('community'))) || `法律分群 ${toJSNumber(rec.get('community'))}`) : null,
             judges: rec.get('judges') || [],
             defendants: cleanedDefendants,
             plaintiffs: rec.get('plaintiffs') || [],
@@ -290,7 +334,7 @@ export async function POST(request: Request) {
         const detail = detailsMap.get(id);
         const cand = candidates.find(c => c.id === id);
         return {
-          ...(detail || { id, court: '', courtLevel: '', caseType: '', reason: '', mainText: '', factReason: '', judges: [], defendants: [], plaintiffs: [], citedLaws: [], similarRecommendations: [], community: null }),
+          ...(detail || { id, court: '', courtLevel: '', caseType: '', reason: '', mainText: '', factReason: '', judges: [], defendants: [], plaintiffs: [], citedLaws: [], similarRecommendations: [], community: null, communityName: null }),
           maxSectionScore: cand ? cand.score : 0,
           searchScore: cand ? cand.score : 0
         };
@@ -303,7 +347,7 @@ export async function POST(request: Request) {
       const detail = detailsMap.get(id);
       const cand = sortedRRF.find(c => c.id === id);
       return {
-        ...(detail || { id, court: '', courtLevel: '', caseType: '', reason: '', mainText: '', factReason: '', judges: [], defendants: [], plaintiffs: [], citedLaws: [], similarRecommendations: [], community: null }),
+        ...(detail || { id, court: '', courtLevel: '', caseType: '', reason: '', mainText: '', factReason: '', judges: [], defendants: [], plaintiffs: [], citedLaws: [], similarRecommendations: [], community: null, communityName: null }),
         maxSectionScore: cand ? cand.score : 0,
         rrfScore: cand ? cand.score : 0
       };

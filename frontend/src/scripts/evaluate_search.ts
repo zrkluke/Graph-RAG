@@ -2,6 +2,7 @@ import { getPostgresPool } from '../lib/postgres';
 import OpenAI from 'openai';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import * as fs from 'fs';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
 dotenv.config({ path: path.resolve(process.cwd(), 'frontend/.env.local') });
@@ -17,21 +18,36 @@ interface Candidate {
 }
 
 // 模擬並行全文檢索
-async function runKeywordCandidates(pool: any, query: string): Promise<Candidate[]> {
+async function runKeywordCandidates(pool: any, query: string, caseType?: string): Promise<Candidate[]> {
   const client = await pool.connect();
   try {
+    const terms = query.split(/\s+/).filter(t => t.trim() !== '').slice(0, 5);
+    if (terms.length === 0) {
+      return [];
+    }
+
+    const ilikeConditions: string[] = [];
+    const params: any[] = [query, caseType || null];
+    
+    terms.forEach((term, index) => {
+      const paramIndex = index + 3;
+      const escapedTerm = term.replace(/[%_\\]/g, '\\$&');
+      params.push(`%${escapedTerm}%`);
+      ilikeConditions.push(`(id ILIKE $${paramIndex} OR main_text ILIKE $${paramIndex} OR fact_reason ILIKE $${paramIndex})`);
+    });
+
     const sql = `
-      SELECT id, ts_rank_cd(to_tsvector('simple', COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')), websearch_to_tsquery('simple', $1)) AS score
+      SELECT id, ts_rank_cd(to_tsvector('simple', COALESCE(id, '') || ' ' || COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')), websearch_to_tsquery('simple', $1)) AS score
       FROM judgments
       WHERE (
-        to_tsvector('simple', COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')) @@ websearch_to_tsquery('simple', $1)
-        OR main_text ILIKE $2
-        OR fact_reason ILIKE $2
+        to_tsvector('simple', COALESCE(id, '') || ' ' || COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')) @@ websearch_to_tsquery('simple', $1)
+        OR (${ilikeConditions.join(' AND ')})
       )
+        AND ($2::text IS NULL OR case_type = $2::text)
       ORDER BY score DESC
-      LIMIT 20;
+      LIMIT 50;
     `;
-    const res = await client.query(sql, [query, `%${query}%`]);
+    const res = await client.query(sql, params);
     return res.rows.map((r: any) => ({ id: r.id, score: Number(r.score) || 0.1 }));
   } finally {
     client.release();
@@ -39,19 +55,21 @@ async function runKeywordCandidates(pool: any, query: string): Promise<Candidate
 }
 
 // 模擬並行向量檢索
-async function runVectorCandidates(pool: any, queryVector: number[]): Promise<Candidate[]> {
+async function runVectorCandidates(pool: any, queryVector: number[], caseType?: string): Promise<Candidate[]> {
   const client = await pool.connect();
   try {
     const vectorStr = `[${queryVector.join(',')}]`;
     const sql = `
       SELECT c.judgment_id AS id, 1 - MIN(c.embedding <=> $1::vector) AS score
       FROM chunks c
+      JOIN judgments j ON c.judgment_id = j.id
       WHERE c.embedding IS NOT NULL
+        AND ($2::text IS NULL OR j.case_type = $2::text)
       GROUP BY c.judgment_id
       ORDER BY score DESC
-      LIMIT 20;
+      LIMIT 50;
     `;
-    const res = await client.query(sql, [vectorStr]);
+    const res = await client.query(sql, [vectorStr, caseType || null]);
     return res.rows.map((r: any) => ({ id: r.id, score: Number(r.score) }));
   } finally {
     client.release();
@@ -79,62 +97,18 @@ function computeRRF(vectorCandidates: Candidate[], keywordCandidates: Candidate[
 
 async function evaluate() {
   console.log('📊 開始執行檢索演算法黃金評估與調優 (RRF Parameter Tuning)...');
-  const pool = getPostgresPool();
   
-  // 1. 從資料庫讀取 15 筆已向量化的判決作為評估測試樣本
-  const client = await pool.connect();
-  let sampleJudgments: any[] = [];
-  try {
-    // 找同時有 chunks 向量以及有事實內容的判決書
-    const sql = `
-      SELECT DISTINCT j.id, j.reason, j.main_text, j.fact_reason 
-      FROM judgments j
-      JOIN chunks c ON c.judgment_id = j.id
-      WHERE c.embedding IS NOT NULL
-      LIMIT 15;
-    `;
-    const res = await client.query(sql);
-    sampleJudgments = res.rows;
-  } finally {
-    client.release();
-  }
-
-  if (sampleJudgments.length === 0) {
-    console.error('❌ 未在資料庫中找到任何已向量化的判決，請先執行 import_sample 與 update_embeddings 腳本！');
-    await pool.end();
+  // 1. 讀取固定的黃金標準測試集 JSON 檔案
+  const jsonPath = path.resolve(process.cwd(), 'src/resources/evaluation_gold_standard.json');
+  if (!fs.existsSync(jsonPath)) {
+    console.error(`❌ 找不到黃金標準測試集檔案: ${jsonPath}`);
     return;
   }
+  
+  const evalSet = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+  console.log(`已成功載入固定的 ${evalSet.length} 筆黃金標準評估案例 (ABCD 題型)。`);
 
-  console.log(`已成功載入 ${sampleJudgments.length} 筆黃金標準評估案例。`);
-
-  // 2. 建立測試問題集 (Query & Ground Truth)
-  const evalSet: { query: string; groundTruth: string }[] = sampleJudgments.map(j => {
-    let queryText = j.reason || '';
-    if (j.fact_reason && j.fact_reason.length > 100) {
-      // 移除空白與常見格式無意義字詞
-      const clean_fact = j.fact_reason.replace(/[\r\n\s\t\u3000]/g, '');
-      
-      // 搜尋代表真實案情起點的關鍵字，讓評估查詢更具情境特徵
-      const keywords = ['駕駛', '行經', '行駛', '撞', '意圖', '持', '呼氣', '安非他命'];
-      let startIndex = 50; // 預設避開開頭法院標題
-      
-      for (const kw of keywords) {
-        const idx = clean_fact.indexOf(kw);
-        // 確保找到的位置不在最前面且不在最後面
-        if (idx > 30 && idx < clean_fact.length - 100) {
-          startIndex = idx;
-          break;
-        }
-      }
-      queryText = clean_fact.substring(startIndex, startIndex + 45).trim();
-    }
-    return {
-      query: queryText,
-      groundTruth: j.id
-    };
-  });
-
-  // 3. 測試不同 RRF 參數 (k = 10, k = 30, k = 60) 的命中率
+  const pool = getPostgresPool();
   const kOptions = [10, 30, 60];
   const summary: any = {};
 
@@ -148,7 +122,8 @@ async function evaluate() {
   
   for (let idx = 0; idx < evalSet.length; idx++) {
     const item = evalSet[idx];
-    const { query, groundTruth } = item;
+    const { query, expected_ids, filters, id, type } = item;
+    const caseType = filters?.caseType;
     
     // 向量化查詢
     const tStartEmbed = performance.now();
@@ -162,27 +137,27 @@ async function evaluate() {
 
     // keyword 檢索
     const tStartKeyword = performance.now();
-    const keywordCandidates = await runKeywordCandidates(pool, query);
+    const keywordCandidates = await runKeywordCandidates(pool, query, caseType);
     const tEndKeyword = performance.now();
     const keywordTime = tEndKeyword - tStartKeyword;
     summary['keyword'].timeTotalMs += keywordTime;
 
     // vector 檢索
     const tStartVector = performance.now();
-    const vectorCandidates = await runVectorCandidates(pool, queryVector);
+    const vectorCandidates = await runVectorCandidates(pool, queryVector, caseType);
     const tEndVector = performance.now();
     const vectorTime = (tEndVector - tStartVector) + embedTime;
     summary['vector'].timeTotalMs += vectorTime;
 
-    // 評估 Keyword 命中率
-    const kwTop3 = keywordCandidates.slice(0, 3).some(c => c.id === groundTruth);
-    const kwTop5 = keywordCandidates.slice(0, 5).some(c => c.id === groundTruth);
+    // 評估 Keyword 召回率 (是否召回任一個 expected_id)
+    const kwTop3 = keywordCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
+    const kwTop5 = keywordCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
     if (kwTop3) summary['keyword'].hitAt3++;
     if (kwTop5) summary['keyword'].hitAt5++;
 
-    // 評估 Vector 命中率
-    const vecTop3 = vectorCandidates.slice(0, 3).some(c => c.id === groundTruth);
-    const vecTop5 = vectorCandidates.slice(0, 5).some(c => c.id === groundTruth);
+    // 評估 Vector 召回率
+    const vecTop3 = vectorCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
+    const vecTop5 = vectorCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
     if (vecTop3) summary['vector'].hitAt3++;
     if (vecTop5) summary['vector'].hitAt5++;
 
@@ -195,13 +170,20 @@ async function evaluate() {
       const rrfKey = `rrf_k_${k}`;
       summary[rrfKey].timeTotalMs += Math.max(keywordTime, vectorTime) + (tEndRRF - tStartRRF);
 
-      const hybTop3 = hybridCandidates.slice(0, 3).some(c => c.id === groundTruth);
-      const hybTop5 = hybridCandidates.slice(0, 5).some(c => c.id === groundTruth);
+      const hybTop3 = hybridCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
+      const hybTop5 = hybridCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
       if (hybTop3) summary[rrfKey].hitAt3++;
       if (hybTop5) summary[rrfKey].hitAt5++;
     }
 
-    console.log(`  [樣品 ${idx + 1}/15] 查詢: "${query.substring(0, 15)}..." (GroundTruth: ${groundTruth.substring(0, 15)}...)`);
+    const defaultHybridCandidates = computeRRF(vectorCandidates, keywordCandidates, 10);
+    const hybHit3 = defaultHybridCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
+    
+    const kwStatus = kwTop3 ? '✅' : '❌';
+    const vecStatus = vecTop3 ? '✅' : '❌';
+    const hybStatus = hybHit3 ? '✅' : '❌';
+
+    console.log(`  [測項 ${id} | ${type}] 查詢: "${query}" (預期 JID: ${expected_ids[0].substring(0, 25)}...) ➡️ Keyword: ${kwStatus} | Vector: ${vecStatus} | Hybrid: ${hybStatus}`);
   }
 
   // 4. 輸出評估結果與調優結論
@@ -222,7 +204,7 @@ async function evaluate() {
   }
 
   console.log('\n💡 [調優結論]：');
-  let bestK = 60;
+  let bestK = 10;
   let maxHit = 0;
   for (const k of kOptions) {
     const hits = summary[`rrf_k_${k}`].hitAt3;

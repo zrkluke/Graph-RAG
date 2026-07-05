@@ -1,0 +1,53 @@
+[
+  {
+    "id": "TC-A01",
+    "type": "A-Semantic",
+    "query": "杜仁忠 黃振遠 交通 損害賠償",
+    "expected_ids": ["CLEV,114,壢小,1477,20260410,2"]
+  },
+  {
+    "id": "TC-B01",
+    "type": "B-Constraint",
+    "query": "潘育茹 劉子威 交通 損害賠償",
+    "filters": {
+      "caseType": "民事"
+    },
+    "expected_ids": ["CLEV,114,壢小,1762,20260410,2"]
+  },
+  {
+    "id": "TC-C01",
+    "type": "C-Keyword",
+    "query": "竹北簡 148,172 損害賠償",
+    "expected_ids": ["CPEV,115,竹北簡,106,20260430,2"]
+  },
+  {
+    "id": "TC-D01",
+    "type": "D-MultiHop",
+    "query": "中小 41,127 侵權行為",
+    "expected_ids": ["TCEV,114,中小,4977,20260430,1"]
+  },
+  {
+    "id": "TC-E01",
+    "type": "Injury-Hand",
+    "query": "車禍被撞手斷骨折 橈骨 損害賠償",
+    "expected_ids": ["TCEV,114,中簡,1843,20260410,1"]
+  },
+  {
+    "id": "TC-F01",
+    "type": "Injury-Head",
+    "query": "車禍被撞腦震盪 頭部外傷 損害賠償",
+    "expected_ids": ["NHEV,114,湖簡,1395,20260415,1"]
+  },
+  {
+    "id": "TC-G01",
+    "type": "Injury-Leg",
+    "query": "脛骨 骨折 損害賠償",
+    "expected_ids": ["SJEV,114,重簡,365,20260424,1"]
+  },
+  {
+    "id": "TC-H01",
+    "type": "Injury-Clavicle",
+    "query": "鎖骨 腦震盪 過失傷害",
+    "expected_ids": ["TNDM,115,交易,146,20260421,1"]
+  }
+]

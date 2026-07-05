@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import neo4j, { Driver } from 'neo4j-driver';
 import OpenAI from 'openai';
+import crypto from 'crypto';
+import { getRedisClient } from '@/lib/redis';
 
 // 宣告全域變數快取，防止 Serverless 冷啟動連線數溢出
 declare global {
@@ -39,6 +41,18 @@ function toJSNumber(val: any): number {
 }
 
 export async function POST(request: Request) {
+  const tStartAPI = performance.now();
+  let cacheKey = '';
+  let useRedis = false;
+  let redisClient: any = null;
+
+  try {
+    redisClient = getRedisClient();
+    useRedis = true;
+  } catch (redisInitError) {
+    console.warn('⚠️ [Redis] 初始化失敗，將不使用快取層:', redisInitError);
+  }
+
   try {
     // 1. 解析前端 Body 傳參
     const body = await request.json().catch(() => ({}));
@@ -46,6 +60,29 @@ export async function POST(request: Request) {
 
     if (!query || typeof query !== 'string' || !query.trim()) {
       return NextResponse.json({ error: '請提供有效的案情情境描述！' }, { status: 400 });
+    }
+
+    // 嘗試從 Redis 讀取快取
+    if (useRedis && redisClient) {
+      try {
+        const rawKey = JSON.stringify({ query, courtLevel, caseType, limit });
+        const hash = crypto.createHash('md5').update(rawKey).digest('hex');
+        cacheKey = `search:cache:${hash}`;
+
+        const cachedData = await redisClient.get(cacheKey);
+        if (cachedData) {
+          const parsedData = JSON.parse(cachedData);
+          const tEndAPI = performance.now();
+          console.log(`⚡ [Redis 快取命中] Key: ${cacheKey}`);
+          return NextResponse.json({
+            ...parsedData,
+            cacheHit: true,
+            executionTimeMs: Math.round(tEndAPI - tStartAPI),
+          });
+        }
+      } catch (redisReadError) {
+        console.error('❌ [Redis 讀取錯誤] Fallback 到即時檢索:', redisReadError);
+      }
     }
 
     // 2. 向量化查詢（用於向量檢索）
@@ -273,7 +310,7 @@ export async function POST(request: Request) {
     });
 
     // 7. 回傳三種搜尋演算法的結果對比與耗時
-    return NextResponse.json({
+    const searchResult = {
       keyword: {
         results: finalKeywordList,
         responseTimeMs: Math.round(keywordRes.time),
@@ -286,6 +323,24 @@ export async function POST(request: Request) {
         results: finalHybridList,
         responseTimeMs: Math.round(hybridTime),
       },
+    };
+
+    // 寫入 Redis 快取
+    if (useRedis && redisClient && cacheKey) {
+      try {
+        await redisClient.set(cacheKey, JSON.stringify(searchResult), 'EX', 259200); // 3天過期
+        console.log(`💾 [Redis 快取寫入成功] Key: ${cacheKey}`);
+      } catch (redisWriteError) {
+        console.error('❌ [Redis 寫入錯誤]:', redisWriteError);
+      }
+    }
+
+    const tEndAPI = performance.now();
+
+    return NextResponse.json({
+      ...searchResult,
+      cacheHit: false,
+      executionTimeMs: Math.round(tEndAPI - tStartAPI),
     });
 
   } catch (error: any) {

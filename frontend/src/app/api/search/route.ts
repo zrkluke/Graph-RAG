@@ -114,14 +114,35 @@ export async function POST(request: Request) {
       const client = await pgPool.connect();
       const tStart = performance.now();
       try {
-        // 使用 websearch_to_tsquery 進行安全的中文分詞檢索，並以 ILIKE 作為 fallback 補強部分匹配
+        const terms = query.split(/\s+/).filter(t => t.trim() !== '').slice(0, 5);
+        const ilikeConditions: string[] = [];
+        const params: any[] = [
+          query,
+          courtLevelList,
+          caseType && caseType !== '全部' ? caseType : null,
+          court && court.trim() !== '' ? court.trim() : null
+        ];
+
+        terms.forEach((term, index) => {
+          const paramIndex = index + 5; // 從 $5 開始
+          // 轉義 LIKE 的特殊字元 %, _, \ 避免全表掃描索引失效
+          const escapedTerm = term.replace(/[%_\\]/g, '\\$&');
+          params.push(`%${escapedTerm}%`);
+          ilikeConditions.push(`(id ILIKE $${paramIndex} OR main_text ILIKE $${paramIndex} OR fact_reason ILIKE $${paramIndex})`);
+        });
+
+        if (ilikeConditions.length === 0) {
+          const escapedQuery = query.trim().replace(/[%_\\]/g, '\\$&');
+          params.push(`%${escapedQuery}%`);
+          ilikeConditions.push(`(main_text ILIKE $5 OR fact_reason ILIKE $5)`);
+        }
+
         const sql = `
-          SELECT id, ts_rank_cd(to_tsvector('simple', COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')), websearch_to_tsquery('simple', $1)) AS score
+          SELECT id, ts_rank_cd(to_tsvector('simple', COALESCE(id, '') || ' ' || COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')), websearch_to_tsquery('simple', $1)) AS score
           FROM judgments
           WHERE (
-            to_tsvector('simple', COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')) @@ websearch_to_tsquery('simple', $1)
-            OR main_text ILIKE $5
-            OR fact_reason ILIKE $5
+            to_tsvector('simple', COALESCE(id, '') || ' ' || COALESCE(main_text, '') || ' ' || COALESCE(fact_reason, '')) @@ websearch_to_tsquery('simple', $1)
+            OR (${ilikeConditions.join(' AND ')})
           )
             AND ($2::text[] IS NULL OR court_level = ANY($2::text[]))
             AND ($3::text IS NULL OR case_type = $3::text)
@@ -129,14 +150,7 @@ export async function POST(request: Request) {
           ORDER BY score DESC
           LIMIT 50;
         `;
-        const likePattern = `%${query.trim()}%`;
-        const res = await client.query(sql, [
-          query,
-          courtLevelList,
-          caseType && caseType !== '全部' ? caseType : null,
-          court && court.trim() !== '' ? court.trim() : null,
-          likePattern
-        ]);
+        const res = await client.query(sql, params);
         const tEnd = performance.now();
         return { 
           candidates: res.rows.map((r: any) => ({ id: r.id as string, score: Number(r.score) || 0.1 })), 

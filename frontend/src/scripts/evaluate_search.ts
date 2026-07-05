@@ -46,6 +46,7 @@ async function runVectorCandidates(pool: any, queryVector: number[]): Promise<Ca
     const sql = `
       SELECT c.judgment_id AS id, 1 - MIN(c.embedding <=> $1::vector) AS score
       FROM chunks c
+      WHERE c.embedding IS NOT NULL
       GROUP BY c.judgment_id
       ORDER BY score DESC
       LIMIT 20;
@@ -108,11 +109,24 @@ async function evaluate() {
 
   // 2. 建立測試問題集 (Query & Ground Truth)
   const evalSet: { query: string; groundTruth: string }[] = sampleJudgments.map(j => {
-    // 擷取事實及理由中第 40~90 字元作為情境查詢 (剛好避開法院名稱與案件標題，直接截到事發經過案情)
     let queryText = j.reason || '';
     if (j.fact_reason && j.fact_reason.length > 100) {
+      // 移除空白與常見格式無意義字詞
       const clean_fact = j.fact_reason.replace(/[\r\n\s\t\u3000]/g, '');
-      queryText = clean_fact.substring(50, 95).trim();
+      
+      // 搜尋代表真實案情起點的關鍵字，讓評估查詢更具情境特徵
+      const keywords = ['駕駛', '行經', '行駛', '撞', '意圖', '持', '呼氣', '安非他命'];
+      let startIndex = 50; // 預設避開開頭法院標題
+      
+      for (const kw of keywords) {
+        const idx = clean_fact.indexOf(kw);
+        // 確保找到的位置不在最前面且不在最後面
+        if (idx > 30 && idx < clean_fact.length - 100) {
+          startIndex = idx;
+          break;
+        }
+      }
+      queryText = clean_fact.substring(startIndex, startIndex + 45).trim();
     }
     return {
       query: queryText,

@@ -195,32 +195,44 @@ export async function write_to_postgres(pool: any, data: any) {
     const j = data.judgment;
     await client.query(judgment_sql, [j.id, j.case_type, j.court, j.court_level, j.date, j.reason, j.main_text, j.fact_reason]);
 
-    // 2. 批次寫入 sections 表
+    // 2. 批次寫入 sections 表 (手動拼接 multi-row insert 語法，減少 SQL round-trip)
     if (data.sections && data.sections.length > 0) {
-      for (const sec of data.sections) {
-        const sec_sql = `
-          INSERT INTO sections (id, judgment_id, index, role, type, text)
-          VALUES ($1, $2, $3, $4, $5, $6)
-          ON CONFLICT (id) DO UPDATE SET
-            role = EXCLUDED.role,
-            type = EXCLUDED.type,
-            text = EXCLUDED.text;
-        `;
-        await client.query(sec_sql, [sec.id, j.id, sec.index, sec.role, sec.type, sec.text]);
-      }
+      const values: any[] = [];
+      const placeholders: string[] = [];
+      data.sections.forEach((sec: any, index: number) => {
+        const offset = index * 6;
+        placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`);
+        values.push(sec.id, j.id, sec.index, sec.role, sec.type, sec.text);
+      });
+      
+      const sec_sql = `
+        INSERT INTO sections (id, judgment_id, index, role, type, text)
+        VALUES ${placeholders.join(',')}
+        ON CONFLICT (id) DO UPDATE SET
+          role = EXCLUDED.role,
+          type = EXCLUDED.type,
+          text = EXCLUDED.text;
+      `;
+      await client.query(sec_sql, values);
     }
 
     // 3. 批次寫入 chunks 表 (embedding 預設留空，待 update_embeddings.ts 補全)
     if (data.chunks && data.chunks.length > 0) {
-      for (const chk of data.chunks) {
-        const chk_sql = `
-          INSERT INTO chunks (id, section_id, judgment_id, index, text)
-          VALUES ($1, $2, $3, $4, $5)
-          ON CONFLICT (id) DO UPDATE SET
-            text = EXCLUDED.text;
-        `;
-        await client.query(chk_sql, [chk.id, chk.section_id, j.id, chk.index, chk.text]);
-      }
+      const values: any[] = [];
+      const placeholders: string[] = [];
+      data.chunks.forEach((chk: any, index: number) => {
+        const offset = index * 5;
+        placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
+        values.push(chk.id, chk.section_id, j.id, chk.index, chk.text);
+      });
+      
+      const chk_sql = `
+        INSERT INTO chunks (id, section_id, judgment_id, index, text)
+        VALUES ${placeholders.join(',')}
+        ON CONFLICT (id) DO UPDATE SET
+          text = EXCLUDED.text;
+      `;
+      await client.query(chk_sql, values);
     }
 
     await client.query('COMMIT');

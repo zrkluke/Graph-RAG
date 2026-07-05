@@ -156,7 +156,8 @@ export async function POST(request: Request) {
           SELECT c.judgment_id AS id, 1 - MIN(c.embedding <=> $1::vector) AS score
           FROM chunks c
           JOIN judgments j ON c.judgment_id = j.id
-          WHERE ($2::text[] IS NULL OR j.court_level = ANY($2::text[]))
+          WHERE c.embedding IS NOT NULL
+            AND ($2::text[] IS NULL OR j.court_level = ANY($2::text[]))
             AND ($3::text IS NULL OR j.case_type = $3::text)
             AND ($4::text IS NULL OR j.court = $4::text)
           GROUP BY c.judgment_id

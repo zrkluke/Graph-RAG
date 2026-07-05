@@ -18,6 +18,7 @@ interface ResultItem {
   plaintiffs: string[];
   citedLaws: string[];
   community?: number | null;
+  communityName?: string | null;
   similarRecommendations?: {
     id: string;
     court: string;
@@ -386,6 +387,12 @@ export default function Home() {
   const [caseType, setCaseType] = useState('全部');
   const [limit, setLimit] = useState(3);
 
+  // 進階篩選狀態
+  const [court, setCourt] = useState('');
+  const [judge, setJudge] = useState('');
+  const [citedLaw, setCitedLaw] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
   // 佈局模式與選取狀態
   const [layoutMode, setLayoutMode] = useState<'classic' | 'compare'>('classic');
   const [selectedItem, setSelectedItem] = useState<ResultItem | null>(null);
@@ -430,6 +437,9 @@ export default function Home() {
           courtLevel,
           caseType,
           limit,
+          court: court.trim(),
+          judge: judge.trim(),
+          citedLaw: citedLaw.trim(),
         }),
       });
 
@@ -539,8 +549,9 @@ export default function Home() {
                 <span
                   className="text-[9px] px-1.5 py-0.2 rounded font-bold text-white shadow-sm"
                   style={{ backgroundColor: `hsl(${communityHue}, 80%, 45%)` }}
+                  title={r.communityName || `Leiden 社群 ${r.community}`}
                 >
-                  社群 {r.community}
+                  {r.communityName || `社群 ${r.community}`}
                 </span>
               )}
             </div>
@@ -675,6 +686,54 @@ export default function Home() {
                   onChange={(e) => setLimit(Number(e.target.value))}
                 />
               </div>
+
+              {/* 進階篩選按鈕 */}
+              <div className="border-t border-slate-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="flex items-center justify-between w-full text-left text-xs font-bold text-slate-500 hover:text-blue-600 transition-colors cursor-pointer"
+                >
+                  <span>🛠️ 進階篩選條件</span>
+                  <span>{showAdvanced ? '▲' : '▼'}</span>
+                </button>
+              </div>
+
+              {/* 進階篩選面板 */}
+              {showAdvanced && (
+                <div className="flex flex-col gap-3.5 bg-slate-50 p-3 rounded-xl border border-slate-200/60 animate-fadeIn">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold text-slate-500">指定法院</label>
+                    <input
+                      type="text"
+                      className="p-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      placeholder="例：臺灣臺北地方法院"
+                      value={court}
+                      onChange={(e) => setCourt(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold text-slate-500">指定法官</label>
+                    <input
+                      type="text"
+                      className="p-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      placeholder="例：陳筠諼"
+                      value={judge}
+                      onChange={(e) => setJudge(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold text-slate-500">指定引用法規</label>
+                    <input
+                      type="text"
+                      className="p-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      placeholder="例：中華民國刑法第185-3條"
+                      value={citedLaw}
+                      onChange={(e) => setCitedLaw(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
 
               <button
                 type="submit"

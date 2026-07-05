@@ -21,35 +21,37 @@
    * **優勢**：Vercel 的免費額度非常慷慨，且支援 **Serverless Route Handlers**（路由處理器）。我們可以直接在 Next.js 的 API 路由中使用 TypeScript/JavaScript 的 `neo4j-driver` 與 `langchain` 直接連接 Neo4j AuraDB，**完全不需要另外花錢租用獨立的 Python FastAPI 後端伺服器**，從而實現 **0 元部署**！
 3. **LLM 與 Embedding API**:
    * 使用 OpenAI API 或其他相容的免費/低成本 LLM 服務。
+4. **Redis 快取層 (Cache)**:
+   * **Upstash Redis** (免費版)：提供雲端 Redis 快取。在 Next.js API 路由中配置 Redis，以查詢參數 MD5 雜湊值為 Key，緩存搜尋結果（TTL 3 天），大幅降低 OpenAI Embedding 的 Token 消耗與 Neo4j 的查詢壓力。
 
 ---
 
 ## 2. 系統架構設計
 
 ```
-              ┌──────────────────────────────────────────┐
-              │             Vercel 雲端平台               │
-              │                                          │
-              │  ┌─────────────────┐                     │
-              │  │  Next.js 前端   │                     │
-              │  │  (React UI)     │                     │
-              │  └────────┬────────┘                     │
-              │           │ (HTTP)                       │
-              │           ▼                              │
-              │  ┌─────────────────┐    ┌─────────────┐  │
-              │  │ Next.js API 路由│───▶│ OpenAI API  │  │
-              │  │ (Serverless API)│    │ (Embedding) │  │
-              │  └────────┬────────┘    └─────────────┘  │
-              └───────────┼──────────────────────────────┘
-                          │ (Bolt over TLS)
-                          ▼
-              ┌──────────────────────────────────────────┐
-              │           Neo4j AuraDB Free              │
-              │                                          │
-              │  • Document (判決書)                     │
-              │  • Entity (被告/法官/法條)               │
-              │  • Vector Index (向量搜尋)                │
-              └──────────────────────────────────────────┘
+              ┌────────────────────────────────────────────────────────┐
+              │                     Vercel 雲端平台                     │
+              │                                                        │
+              │  ┌─────────────────┐                                   │
+              │  │  Next.js 前端   │                                   │
+              │  │  (React UI)     │                                   │
+              │  └────────┬────────┘                                   │
+              │           │ (HTTP)                                     │
+              │           ▼                                            │
+              │  ┌─────────────────┐    ┌─────────────┐  ┌──────────┐  │
+              │  │ Next.js API 路由│───▶│ OpenAI API  │  │ Upstash  │  │
+              │  │ (Serverless API)│    │ (Embedding) │  │  Redis   │  │
+              │  └────────┬────────┘    └─────────────┘  └────┬─────┘  │
+              └───────────┼───────────────────────────────────┼────────┘
+                          │ (Bolt over TLS)                   │ (Cache Hit/Miss)
+                          ▼                                   ▼
+              ┌────────────────────────────────────────────────────────┐
+              │                   Neo4j AuraDB Free                    │
+              │                                                        │
+              │  • Document (判決書)                                   │
+              │  • Entity (被告/法官/法條)                             │
+              │  • Vector Index (向量搜尋)                              │
+              └────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -84,17 +86,39 @@
 
 ## 4. 搜尋與檢索演算法 (Search Pipeline)
 
-1. **使用者輸入**：`情境描述`（例：「被告騎腳踏車闖紅燈，撞倒行人致使骨折後逃逸」）與`篩選條件`（例：`court_level` 限制在 "高等法院"）。
+1. **快取檢索與雜湊**：
+   * 使用者輸入 `query`、`courtLevel`、`caseType`、`court`、`judge`、`citedLaw`、`limit` 等搜尋參數。
+   * API 先對這些參數的 JSON 字串計算 MD5 雜湊作為 Redis Cache Key。
+   * **快取命中 (Cache Hit)**：若 Redis 中存在該 Key，直接讀取並回傳，不向 OpenAI 或 Neo4j 發送請求。
+   * **快取未命中 (Cache Miss)**：執行下方 2-5 步，並在成功後寫入 Redis（TTL 3 天）。
 2. **向量化**：透過 OpenAI Embedding 將情境描述轉換為 1536 維向量。
 3. **混合檢索 (Hybrid Search & Graph Query)**：
-   * **步驟 1**：在 Neo4j 中利用 Vector Index 對 `Judgment` 節點的 `embedding` 屬性進行相似度檢索，並套用 `court_level` 屬性過濾器。
-   * **步驟 2**：提取出 Top K 筆最相似的 `Judgment` 節點。
-   * **步驟 3**：利用圖關係（Graph Relations），順著 `CITED` 與 `CHARGED_WITH` 提取這些相似判決書共同引用的法條 (`Law`) 與罪名 (`Crime`)。
-   * **步驟 4**：將判決書內容、提取出的實體關係、關聯法條彙整，提供給前端介面，甚至可選交由 LLM 進行綜合分析與相似度評估。
+   * **步驟 1**：在 Neo4j 中利用 Vector Index（對 `embedding` 屬性）與 Fulltext Index 進行雙管道候選檢索。
+   * **步驟 2**：在 Cypher 語句中同時套用軟/硬篩選過濾器：
+     * `court_level` 與 `case_type` 的值篩選。
+     * **硬過濾條件**：指定法院 (`j.court = $court`)，以及法官與法規的關係硬過濾（使用 `EXISTS { (j)-[:JUDGED_BY]->(:Person {name: $judge}) }` 與 `EXISTS { (j)-[:CITED]->(:Law {name: $citedLaw}) }`）。
+   * **步驟 3**：提取出最相似的 `Judgment` 節點，並在 Node.js 中計算混合 RRF (Reciprocal Rank Fusion) 評分進行融合排序。
+4. **社群語意命名與詳情裝配**：
+   * 批次撈取相似判決書詳情前，執行全域聚合查詢，計算各 Leiden 社群最常引用的前兩名法規：
+     `MATCH (j:Judgment)-[:CITED]->(l:Law) WHERE j.community IS NOT NULL RETURN j.community, l.name, count(j)`。
+   * 動態產生語意化分群名稱，如 `法律分群 1 (主要引用：刑法第185-3條)`。
+   * 撈取判決書的一跳關聯實體（法官、被告、原告、引用法規），並裝配回三欄結果回傳。
 
 ---
 
-## 5. 開發指南與階段任務
+## 5. 圖譜非同步展開與懶加載 (Graph Expansion)
+
+為了解決大量資料庫節點一次性加載帶來的瀏覽器卡頓，系統設計了非同步圖譜懶加載機制：
+1. **二跳擴展 API (`/api/graph/expand`)**：
+   * **法條節點 (`law`)**：雙擊展開引用了該法規的最新的 8 筆判決書。
+   * **人物節點 (`person`)**：雙擊展開與該法官或當事人相關聯的最新的 8 筆判決書。
+   * **判決書節點 (`judgment`)**：雙擊展開與該判決書共享最多引用法規的最相似 5 筆判決書（SIMILAR_TO 關係，二跳推薦）。
+2. **前端資料狀態管理**：
+   * 前端 `GraphNetwork.tsx` 使用 `vis-network` 的 `DataSet` 管理 `nodes` 與 `edges`，雙擊時調用展開 API 獲取鄰接節點與關係，利用 `DataSet.add` 動態增量寫入並去重，維持節點位置以防圖譜重繪，並帶有流暢的動態引力發散動畫。
+
+---
+
+## 6. 開發指南與階段任務
 
 作為開發代理人，在接續的工作中請遵守：
 1. **以 `openspec` 驅動與平台雙向同步**：進行任何 API 實作、圖譜解析或重大代碼重構前，AI 助理必須同時：

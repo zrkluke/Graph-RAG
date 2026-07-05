@@ -5,12 +5,14 @@
 ---
 
 ## 🚀 核心功能
-* **語意與篩選混合檢索 (Hybrid Search)**：支援自然語言情境描述（如「被告酒後騎車撞傷行人並逃逸」），結合法院層級（最高法院、高等法院、地方法院）等多重條件進行篩選。
+* **語意與篩選混合檢索 (Hybrid Search)**：支援自然語言情境描述（如「被告酒後騎車撞傷行人並逃逸」），結合法院層級（最高法院、高等法院、地方法院）等多重條件進行篩選，並支援指定法院、法官與引用法規的硬約束過濾。
 * **知識圖譜關聯分析 (Graph Analytics)**：擷取判決書中的重要實體（被告、法官、引用法條、涉及罪名）並在 Neo4j 中建立多維關係，分析相似判決書的共同引用特徵。
-* **互動式圖譜視覺化**：前端採用 Next.js + React 搭配 `vis-network`，實現判決關聯圖譜的動態呈現、節點拖曳互動與社群偵測（Community Detection）分群著色。
+* **互動式圖譜視覺化與懶加載**：前端採用 `vis-network` 動態渲染圖譜。支援**雙擊任何節點非同步展開二跳關係**（二跳相似推薦案件、法規引用案件、人物參與案件），並提供酷炫的動態發散物理動畫。
+* **Redis 高效快取層**：串接 **Upstash Redis** (或 Local Docker Redis)，自動將相同搜尋條件的結果進行 MD5 雜湊快取 (3天 TTL)，並在 API 層提供秒級的 Failover 降級容錯。
 * **0 元雲端部署策略**：
   * **前端與 API 路由**：Vercel (Next.js) Serverless API，無須獨立 Python 後端。
   * **圖資料庫**：Neo4j AuraDB Free（免費提供 20 萬節點與 40 萬關係）。
+  * **快取層**：Upstash Redis Free Tier (0 元雲端快取)。
   * **向量與 LLM 服務**：整合 OpenAI API (Embedding & LLM)。
 
 ---
@@ -111,11 +113,17 @@ flowchart TD
 ## 🛠️ 快速開始
 
 ### 步驟 1：複製並設定環境變數
-在專案根目錄下複製環境變數範例：
+In the root directory, copy the environment variable example:
 ```bash
 cp .env.example frontend/.env.local
 ```
-編輯 `frontend/.env.local` 檔案，填入您的 **Neo4j AuraDB** 連線資訊，以及 **OpenAI API Key**。
+編輯 `frontend/.env.local` 檔案，填入您的 **Neo4j AuraDB** 連線資訊、**OpenAI API Key**，以及 **Upstash Redis** 連線參數（若本機測試不使用 Redis，可將 `USE_REDIS` 設為 `false`）：
+```env
+USE_REDIS=true
+REDIS_HOST=your-upstash-redis-host
+REDIS_PORT=6379
+REDIS_PASSWORD=your-redis-password
+```
 
 ### 步驟 2：安裝 Node 依賴套件
 在專案根目錄下，進入 `frontend` 目錄並安裝所有依賴（包含編譯與執行 TS 腳本需要的 `tsx` 和 `dotenv`）：
@@ -148,6 +156,10 @@ npm install
    ```bash
    npm run db:verify
    ```
+6. **清空 Redis 快取數據**：
+   ```bash
+   npm run db:flush-redis
+   ```
 
 ### 步驟 4：啟動 Web 搜尋介面 (Next.js 前端)
 在專案根目錄下直接執行：
@@ -163,9 +175,8 @@ npm run dev
 本專案的待辦功能與未來優化事項已全面遷移至 **OpenSpec 變更提案** 中進行管理。這能確保所有協同開發的 AI 助理能精確讀取並追蹤最新任務狀態。
 
 目前進行中與待討論的 WIP 分類提案如下：
-1. **[知識圖譜與向量演算法優化](file:///C:/Program%20Files/Projects/判決搜尋系統/openspec/changes/wip-graph-and-algorithms/)**：包含罪名/事證 Schema 擴充、圖譜硬約束過濾、多跳推理檢索、檢索評估測試集與中文斷詞器優化。
-2. **[前端複合搜尋與 vis.js 視覺化 UX 優化](file:///C:/Program%20Files/Projects/判決搜尋系統/openspec/changes/wip-frontend-and-ux/)**：包含前端複合條件篩選、法規共現高亮、圖譜節點懶加載 (Lazy Loading) 以及動態社群語意命名。
-3. **[增量導入資料流水線與連線池維運優化](file:///C:/Program%20Files/Projects/判決搜尋系統/openspec/changes/wip-pipeline-and-ops/)**：包含全量資料重新向量化、連線池交易重試優化、Supabase 佇列控流增量同步流水線與同步監控儀表板。
+1. **[知識圖譜與向量演算法優化](file:///c:/PythonSideProjects/判決書搜尋系統/openspec/changes/wip-graph-and-algorithms/)**：包含罪名/事證 Schema 擴充、圖譜硬約束過濾、多跳推理檢索、檢索評估測試集與中文斷詞器優化。
+2. **[增量導入資料流水線與連線池維運優化](file:///c:/PythonSideProjects/判決書搜尋系統/openspec/changes/wip-pipeline-and-ops/)**：包含全量資料重新向量化、連線池交易重試優化、Supabase 佇列控流增量同步流水線與同步監控儀表板。
 
 > [!TIP]
 > 協同開發 AI 助理（如 Cursor, Claude Code, Codex）將會自動讀取上述路徑中的 `proposal.md` 與 `tasks.md` 以獲取下一步的具體開發任務，請勿直接修改此 README 中的 WIP 說明。

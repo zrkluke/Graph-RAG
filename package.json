@@ -11,6 +11,7 @@
     "db:update-embeddings": "npm run db:update-embeddings --prefix frontend",
     "db:verify": "npm run db:verify --prefix frontend",
     "db:search": "npm run db:search --prefix frontend",
+    "db:flush-redis": "npm run db:flush-redis --prefix frontend",
     "dev": "npm run dev --prefix frontend",
     "build": "npm run build --prefix frontend",
     "start": "npm run start --prefix frontend"

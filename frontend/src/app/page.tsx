@@ -396,6 +396,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'cards' | 'graph'>('cards');
+  const [cacheHit, setCacheHit] = useState<boolean | null>(null);
+  const [executionTimeMs, setExecutionTimeMs] = useState<number | null>(null);
 
   // Accordion 展開狀態管理 (比對模式下使用)
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
@@ -416,6 +418,8 @@ export default function Home() {
 
     setLoading(true);
     setError('');
+    setCacheHit(null);
+    setExecutionTimeMs(null);
 
     try {
       const response = await fetch('/api/search', {
@@ -440,6 +444,8 @@ export default function Home() {
         vector: data.vector,
         hybrid: data.hybrid,
       });
+      setCacheHit(data.cacheHit ?? false);
+      setExecutionTimeMs(data.executionTimeMs ?? null);
       setSearchedQuery(searchQuery.trim());
 
       // 預設將混合檢索的第一筆設為當前選中的項目
@@ -708,8 +714,26 @@ export default function Home() {
 
         {/* 右側結果展示區 */}
         <section className="flex-1 flex flex-col gap-5 min-w-0">
-          <div className="border-l-4 border-blue-600 pl-2.5 flex justify-between items-center">
+          <div className="border-l-4 border-blue-600 pl-2.5 flex justify-between items-center flex-wrap gap-2">
             <h2 className="font-bold text-slate-800 text-lg">📋 匹配結果與圖譜統計</h2>
+            {cacheHit !== null && (
+              <div className="flex items-center gap-2 text-xs font-bold">
+                {cacheHit ? (
+                  <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-0.5 shadow-sm">
+                    ⚡ 快取命中 (Redis Cache Hit)
+                  </span>
+                ) : (
+                  <span className="bg-blue-100 text-blue-800 border border-blue-300 px-2 py-0.5 rounded-full flex items-center gap-0.5 shadow-sm">
+                    🔍 即時檢索 (Neo4j Search)
+                  </span>
+                )}
+                {executionTimeMs !== null && (
+                  <span className="bg-slate-100 text-slate-700 border border-slate-300 px-2 py-0.5 rounded-full shadow-sm">
+                    ⏱️ API 總耗時: {executionTimeMs} ms
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {!hasResults ? (

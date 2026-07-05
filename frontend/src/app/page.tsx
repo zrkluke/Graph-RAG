@@ -668,6 +668,7 @@ export default function Home() {
                     <option>民事</option>
                     <option>刑事</option>
                     <option>行政</option>
+                    <option>懲戒</option>
                   </select>
                 </div>
               </div>

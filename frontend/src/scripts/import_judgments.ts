@@ -7,6 +7,7 @@ import { parse_court_from_folder } from './court_parser';
 import { clean_judgment_text } from './text_cleaner';
 import { extract_statutes } from './statute_parser';
 import { split_judgment_into_sections } from './judgment_splitter';
+import { getPostgresPool } from '../lib/postgres';
 
 // 載入環境變數
 dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
@@ -26,14 +27,12 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
   let judges: string[] = [];
   for (const line of lines) {
     const line_stripped = line.trim();
-    // 尋找法官行，例如「法官 陳筠諼」或「審判長法官 陳筠諼」
     const judge_match = line_stripped.match(/(?:審判長法官|獨任法官|實習法官|法[ \t\u3000]*官)[ \t\u3000]*([^\r\n\s\u3000]+)/);
     if (judge_match) {
       let name = judge_match[1];
-      // 過濾常見噪音字詞
       if (name && !["書記官", "正本", "以上", "處分", "判決"].some(k => name.includes(k))) {
         name = name.split(/[（(]/)[0].trim();
-        if (name.length >= 2 && name.length <= 10) {  // 台灣人名通常在 2 至 10 字間
+        if (name.length >= 2 && name.length <= 10) {
           judges.push(name);
         }
       }
@@ -41,7 +40,7 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
   }
   judges = Array.from(new Set(judges));
 
-  // 2. 提取原告、被告、訴訟代理人 (在前 150 行當事人區塊中)
+  // 2. 提取原告、被告、訴訟代理人
   let plaintiffs: string[] = [];
   let defendants: string[] = [];
   let representatives: string[] = [];
@@ -63,7 +62,6 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
     if (!line_stripped) {
       continue;
     }
-      
     if (["共同", "共", "同"].includes(line_stripped)) {
       continue;
     }
@@ -84,14 +82,12 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
       current_role = 'REPRESENTATIVE';
       name_part = is_rep[1].trim();
     } else {
-      // 支援排版縮排的共同原告或被告
       if (current_role && (line_raw.startsWith(' ') || line_raw.startsWith('\t') || line_raw.startsWith('\u3000'))) {
         name_part = line_stripped;
       }
     }
                 
     if (name_part) {
-      // 清洗名字，切除住址、身份證號等資訊
       let name_clean = name_part.split(/[ \t\u3000]+(?:住|設|送達代收人|身分證|統一編號)/)[0];
       name_clean = name_clean.split(/[（(]/)[0].trim();
       
@@ -108,7 +104,7 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
       }
     }
   }
-                        
+                         
   plaintiffs = Array.from(new Set(plaintiffs));
   defendants = Array.from(new Set(defendants));
   representatives = Array.from(new Set(representatives));
@@ -121,29 +117,126 @@ export function extract_parties_and_judges(full_text: string): ExtractedParties 
   };
 }
 
+/**
+ * 任務 2.1：罪名實體抽取
+ */
+export function extract_crimes(reason: string, full_text: string): string[] {
+  const crimes = ['公共危險', '過失傷害', '過失致死', '傷害', '殺人', '竊盜', '詐欺', '毒品危害防制條例', '強盜', '槍砲彈藥刀械管制條例', '肇事逃逸', '毀損', '洗錢', '妨害公務', '妨害自由', '妨害性自主', '偽造文書', '賭博'];
+  const matched: string[] = [];
+  
+  for (const crime of crimes) {
+    if (reason.includes(crime) || (crime.length >= 4 && full_text.includes(crime))) {
+      matched.push(crime);
+    }
+  }
+  
+  if (matched.length === 0 && reason.includes('罪')) {
+    const clean_reason = reason.split(/[罪]/)[0].trim() + '罪';
+    if (clean_reason.length > 2 && clean_reason.length <= 15) {
+      matched.push(clean_reason);
+    }
+  }
+  
+  return Array.from(new Set(matched));
+}
+
+/**
+ * 任務 2.1：關鍵事證實體抽取
+ */
+export function extract_items(full_text: string): string[] {
+  const items = ['呼氣酒精濃度', '吐氣酒精濃度', '酒精濃度', '安非他命', '海洛因', '愷他命', '凶器', '水果刀', '西瓜刀', '鐵棍', '扁鑽', '木棍', '自用小客車', '自用小貨車', '重型機車'];
+  const matched: string[] = [];
+  
+  for (const item of items) {
+    if (full_text.includes(item)) {
+      matched.push(item);
+    }
+  }
+  return Array.from(new Set(matched));
+}
+
 export async function init_db(driver: any) {
   const session = driver.session();
   try {
-    console.log("建立 Unique Constraints...");
+    console.log("建立 Neo4j Unique Constraints...");
     await session.run("CREATE CONSTRAINT judgment_id_unique IF NOT EXISTS FOR (j:Judgment) REQUIRE j.id IS UNIQUE");
-    await session.run("CREATE CONSTRAINT section_id_unique IF NOT EXISTS FOR (s:Section) REQUIRE s.id IS UNIQUE");
-    await session.run("CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE");
     await session.run("CREATE CONSTRAINT law_name_unique IF NOT EXISTS FOR (l:Law) REQUIRE l.name IS UNIQUE");
     await session.run("CREATE CONSTRAINT person_name_unique IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE");
+    await session.run("CREATE CONSTRAINT crime_name_unique IF NOT EXISTS FOR (c:Crime) REQUIRE c.name IS UNIQUE");
+    await session.run("CREATE CONSTRAINT item_name_unique IF NOT EXISTS FOR (i:Item) REQUIRE i.name IS UNIQUE");
     
-    console.log("建立 Full-Text Index...");
-    await session.run(`
-      CREATE FULLTEXT INDEX judgment_text_index IF NOT EXISTS 
-      FOR (n:Judgment) 
-      ON EACH [n.main_text, n.fact_reason]
-    `);
+    // 注意：已不再建立 Section 與 Chunk 的 constraint 與 Index
   } finally {
     await session.close();
   }
 }
 
+/**
+ * 將 Chunks、Sections 與 Judgment 全文寫入 PostgreSQL
+ */
+export async function write_to_postgres(pool: any, data: any) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // 1. 寫入 judgments 表
+    const judgment_sql = `
+      INSERT INTO judgments (id, case_type, court, court_level, date, reason, main_text, fact_reason)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (id) DO UPDATE SET
+        case_type = EXCLUDED.case_type,
+        court = EXCLUDED.court,
+        court_level = EXCLUDED.court_level,
+        date = EXCLUDED.date,
+        reason = EXCLUDED.reason,
+        main_text = EXCLUDED.main_text,
+        fact_reason = EXCLUDED.fact_reason;
+    `;
+    const j = data.judgment;
+    await client.query(judgment_sql, [j.id, j.case_type, j.court, j.court_level, j.date, j.reason, j.main_text, j.fact_reason]);
+
+    // 2. 批次寫入 sections 表
+    if (data.sections && data.sections.length > 0) {
+      for (const sec of data.sections) {
+        const sec_sql = `
+          INSERT INTO sections (id, judgment_id, index, role, type, text)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (id) DO UPDATE SET
+            role = EXCLUDED.role,
+            type = EXCLUDED.type,
+            text = EXCLUDED.text;
+        `;
+        await client.query(sec_sql, [sec.id, j.id, sec.index, sec.role, sec.type, sec.text]);
+      }
+    }
+
+    // 3. 批次寫入 chunks 表 (embedding 預設留空，待 update_embeddings.ts 補全)
+    if (data.chunks && data.chunks.length > 0) {
+      for (const chk of data.chunks) {
+        const chk_sql = `
+          INSERT INTO chunks (id, section_id, judgment_id, index, text)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (id) DO UPDATE SET
+            text = EXCLUDED.text;
+        `;
+        await client.query(chk_sql, [chk.id, chk.section_id, j.id, chk.index, chk.text]);
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * 寫入 Neo4j 拓撲結構 (Judgment 骨架與關聯實體，移除長文本)
+ */
 export async function write_to_neo4j(tx: any, data: any) {
-  // 1. 寫入 Judgment 節點
+  // 1. 寫入 Judgment 骨架 (不儲存 main_text 與 fact_reason)
   const judgment_query = `
   MERGE (j:Judgment {id: $id})
   ON CREATE SET 
@@ -151,55 +244,22 @@ export async function write_to_neo4j(tx: any, data: any) {
     j.court = $court,
     j.court_level = $court_level,
     j.date = case when $date is not null then date($date) else null end,
-    j.reason = $reason,
-    j.main_text = $main_text,
-    j.fact_reason = $fact_reason
+    j.reason = $reason
   ON MATCH SET
     j.case_type = $case_type,
     j.court = $court,
     j.court_level = $court_level,
     j.date = case when $date is not null then date($date) else null end,
-    j.reason = $reason,
-    j.main_text = $main_text,
-    j.fact_reason = $fact_reason
+    j.reason = $reason
   `;
-  await tx.run(judgment_query, data.judgment);
-  
-  // 1.5 批次寫入 Section 節點並與 Judgment 連接
-  if (data.sections && data.sections.length > 0) {
-    const section_query = `
-    UNWIND $sections AS sec
-    MERGE (s:Section {id: sec.id})
-    ON CREATE SET 
-      s.role = sec.role,
-      s.type = sec.type,
-      s.text = sec.text
-    ON MATCH SET
-      s.role = sec.role,
-      s.type = sec.type,
-      s.text = sec.text
-    WITH sec, s
-    MERGE (j:Judgment {id: $id})
-    MERGE (j)-[:HAS_SECTION {index: sec.index}]->(s)
-    `;
-    await tx.run(section_query, { id: data.judgment.id, sections: data.sections });
-  }
-      
-  // 1.6 批次寫入 Chunk 節點並與 Section 連接
-  if (data.chunks && data.chunks.length > 0) {
-    const chunk_query = `
-    UNWIND $chunks AS chk
-    MERGE (c:Chunk {id: chk.id})
-    ON CREATE SET 
-      c.text = chk.text
-    ON MATCH SET
-      c.text = chk.text
-    WITH chk, c
-    MERGE (s:Section {id: chk.section_id})
-    MERGE (s)-[:HAS_CHUNK {index: chk.index}]->(c)
-    `;
-    await tx.run(chunk_query, { chunks: data.chunks });
-  }
+  await tx.run(judgment_query, {
+    id: data.judgment.id,
+    case_type: data.judgment.case_type,
+    court: data.judgment.court,
+    court_level: data.judgment.court_level,
+    date: data.judgment.date,
+    reason: data.judgment.reason
+  });
       
   // 2. 批次寫入並連接 Law 節點
   if (data.laws && data.laws.length > 0) {
@@ -260,6 +320,30 @@ export async function write_to_neo4j(tx: any, data: any) {
     `;
     await tx.run(j_query, { id: data.judgment.id, judges: data.parties.judges });
   }
+
+  // 7. 罪名
+  if (data.crimes && data.crimes.length > 0) {
+    const crime_query = `
+    UNWIND $crimes AS c_name
+    MERGE (c:Crime {name: c_name})
+    WITH c_name, c
+    MERGE (j:Judgment {id: $id})
+    MERGE (j)-[:CHARGED_WITH]->(c)
+    `;
+    await tx.run(crime_query, { id: data.judgment.id, crimes: data.crimes });
+  }
+
+  // 8. 關鍵事證
+  if (data.items && data.items.length > 0) {
+    const item_query = `
+    UNWIND $items AS i_name
+    MERGE (i:Item {name: i_name})
+    WITH i_name, i
+    MERGE (j:Judgment {id: $id})
+    MERGE (j)-[:FOUND_WITH]->(i)
+    `;
+    await tx.run(item_query, { id: data.judgment.id, items: data.items });
+  }
 }
 
 export function getJsonFiles(dir: string): string[] {
@@ -311,9 +395,12 @@ export async function import_files(json_files: string[]) {
     if (driver) await driver.close();
     return;
   }
+
+  // 取得 Postgres Pool 連線池
+  const pgPool = getPostgresPool();
       
   try {
-    // 初始化資料庫索引與約束
+    // 初始化 Neo4j 資料庫索引與約束
     await init_db(driver);
     
     let success_count = 0;
@@ -321,26 +408,12 @@ export async function import_files(json_files: string[]) {
     let processed_count = 0;
     const concurrency = 20;
 
-    console.log(`啟動高併發匯入 (併發數: ${concurrency}，重用連線會話)...`);
+    console.log(`啟動雙資料庫高併發匯入 (併發數: ${concurrency})...`);
     const startTime = Date.now();
 
-    /**
-     * runWorker: 獨立的併發寫入工作者
-     * 
-     * 為了大幅提升連線至雲端 Neo4j AuraDB (Bolt over TLS) 的匯入效能，本架構引入了以下優化機制：
-     * 1. 【高併發 (High Concurrency)】: 建立 20 組並行 Worker，利用非同步 Promise 滑動窗口動態消化檔案隊列，隱藏公網 RTT 網路延遲。
-     * 2. 【會話重用 (Connection/Session Reuse)】: 每個 Worker 重複使用同一個 Session 進行 executeWrite，避免每筆資料開關會話所產生的 TCP & TLS 握手延遲。
-     * 3. 【超時防掛起 (Write Timeout Protection)】: 寫入操作強制加上 10 秒的 Timeout。當遭遇公網靜默斷線 (Silent Connection Drop) 時，可主動中斷 hanging 狀態，拋出超時異常。
-     * 4. 【斷線自動重建 (Auto-Reconnect)】: 捕獲 ECONNRESET、Failed to connect 或 Timeout 等連線崩潰錯誤時，主動釋放並丟棄損壞的舊會話，重新建立全新 Session 並重新寫入該筆資料。
-     * 5. 【死結自動重試 (Deadlock Self-Healing)】: 併發寫入熱點節點 (例如熱門法條、法官姓名) 導致資料庫鎖定死結時，自動延遲 500ms 後重試 (最多 3 次)，免除不必要的匯入失敗。
-     */
-    /**
-     * import_single_file: 獨立處理單個判決書檔案並寫入 Neo4j
-     */
     const import_single_file = async (file_path: string, currentSession: any): Promise<void> => {
       const parent_folder = path.basename(path.dirname(file_path));
       
-      // 解析法院資訊與案件種類
       const court_info = parse_court_from_folder(parent_folder);
       if (!court_info) {
         throw new Error(`無法解析資料夾名稱 '${parent_folder}'`);
@@ -358,23 +431,21 @@ export async function import_files(json_files: string[]) {
         throw new Error(`檔案缺少 JID 或 JFULL`);
       }
       
-      // 清洗與轉換
       const clean_text = clean_judgment_text(jfull);
       
-      // 抽取法條與關係人
       const extracted_stats = extract_statutes(clean_text);
       let laws_list = extracted_stats.map(s => `${s.law}第${s.article}條${s.sub}`);
       laws_list = Array.from(new Set(laws_list));
       
       const parties = extract_parties_and_judges(jfull);
+      const crimes = extract_crimes(jtitle, clean_text);
+      const items = extract_items(clean_text);
       
-      // 格式化日期為 YYYY-MM-DD
       let date_str: string | null = null;
       if (jdate.length === 8) {
         date_str = `${jdate.substring(0, 4)}-${jdate.substring(4, 6)}-${jdate.substring(6, 8)}`;
       }
       
-      // 分離「主文」與「事實及理由」
       let main_text = "";
       let fact_reason = clean_text;
       
@@ -389,10 +460,9 @@ export async function import_files(json_files: string[]) {
       }
       
       if (!main_text) {
-        main_text = jtitle;  // fallback
+        main_text = jtitle;
       }
       
-      // 進行 Section 段落切分
       const sections_list = split_judgment_into_sections(court_info.case_type || '其他', fact_reason);
       const formatted_sections: any[] = [];
       const formatted_chunks: any[] = [];
@@ -407,7 +477,6 @@ export async function import_files(json_files: string[]) {
           text: sec.text
         });
         
-        // 處理 Section 底下的 Chunks
         const chunks_list = sec.chunks || [];
         for (let chk_idx = 0; chk_idx < chunks_list.length; chk_idx++) {
           formatted_chunks.push({
@@ -433,10 +502,15 @@ export async function import_files(json_files: string[]) {
         sections: formatted_sections,
         chunks: formatted_chunks,
         laws: laws_list,
-        parties: parties
+        parties: parties,
+        crimes: crimes,
+        items: items
       };
       
-      // 寫入 Neo4j
+      // 1. 寫入 PostgreSQL (包含全文、Sections、Chunks，不含向量)
+      await write_to_postgres(pgPool, import_data);
+      
+      // 2. 寫入 Neo4j (僅寫入骨架與關係鏈，移除 Section/Chunk 節點)
       await currentSession.executeWrite((tx: any) => write_to_neo4j(tx, import_data));
     };
 
@@ -454,11 +528,10 @@ export async function import_files(json_files: string[]) {
 
           while (retryCount < maxRetries && !success) {
             try {
-              // 寫入 Neo4j (重用 session，加上 10 秒超時以防止靜默連線斷開引發掛起)
               await PromiseWithTimeout(
                 import_single_file(file_path, session),
-                10000,
-                'Neo4j write timeout (ECONNRESET or network hang)'
+                15000, // 擴大至 15 秒以相容雙寫時間
+                'Double-write database timeout'
               );
               success_count++;
               success = true;
@@ -479,21 +552,21 @@ export async function import_files(json_files: string[]) {
               if (isUnrecoverable) {
                 console.log(`[錯誤] 匯入檔案 '${path.basename(file_path)}' 失敗: ${errMsg}`);
                 error_count++;
-                success = true; // 直接標記為結束，不重試
+                success = true;
               } else if (isConnectionError) {
-                console.log(`[連線重置] 偵測到 Neo4j 連線中斷或超時，正在重新建立會話並重試: ${path.basename(file_path)} (重試次數: ${retryCount + 1})`);
+                console.log(`[連線重置] 偵測到資料庫連線中斷或超時，正在重新建立會話並重試: ${path.basename(file_path)} (重試次數: ${retryCount + 1})`);
                 try { await session.close(); } catch (e) {}
                 session = driver.session();
                 retryCount++;
-                await new Promise(r => setTimeout(r, 1000)); // 等待 1 秒後重試
+                await new Promise(r => setTimeout(r, 1000));
               } else if (isDeadlock) {
                 retryCount++;
                 console.log(`[死結衝突] 偵測到資料庫寫入鎖定死結，將在 500ms 後重試: ${path.basename(file_path)} (重試次數: ${retryCount})`);
-                await new Promise(r => setTimeout(r, 500)); // 等待 0.5 秒後重試
+                await new Promise(r => setTimeout(r, 500));
               } else {
                 console.log(`[錯誤] 匯入檔案 '${path.basename(file_path)}' 失敗: ${ex}`);
                 error_count++;
-                success = true; // 其他非暫時性錯誤，跳過不重試
+                success = true;
               }
             }
           }
@@ -512,13 +585,16 @@ export async function import_files(json_files: string[]) {
     await Promise.all(workers);
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n[匯入完成] 共耗時 ${duration} 秒。成功：${success_count} 筆，失敗：${error_count} 筆。`);
+    console.log(`\n[雙寫匯入完成] 共耗時 ${duration} 秒。成功：${success_count} 筆，失敗：${error_count} 筆。`);
     return { success_count, error_count };
   } finally {
     if (driver) {
       await driver.close();
       console.log("Neo4j 連線已關閉。");
     }
+    // 關閉 PostgreSQL 連線池
+    await pgPool.end();
+    console.log("Postgres 連線池已關閉。");
   }
 }
 

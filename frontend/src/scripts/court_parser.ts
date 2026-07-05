@@ -13,6 +13,7 @@ export function to_generic_root_norm(unit_norm: string): string {
   if (unit_norm.includes("憲法法庭")) return "憲法法庭";
   if (unit_norm.includes("最高行政法院")) return "最高行政法院";
   if (unit_norm.includes("最高法院")) return "最高法院";
+  if (unit_norm.includes("懲戒法院")) return "懲戒法院";
   if (unit_norm.includes("智慧財產")) return "智財商業法院";
   if (unit_norm.includes("簡易庭")) return "地方法院簡易庭";
   if (unit_norm.includes("地方庭")) return "高等行政法院地方庭";
@@ -42,6 +43,18 @@ export function parse_court_from_folder(folder_name: string): CourtParseResult |
       district: "中正區",
       level: 0,
       case_type,
+    };
+  }
+
+  // 0.5. 懲戒法院
+  if (court_name.includes("懲戒法院")) {
+    return {
+      unit_norm: "懲戒法院",
+      court_root_norm: "懲戒法院",
+      county: "臺北市",
+      district: "中正區",
+      level: 1,
+      case_type: "懲戒",
     };
   }
 

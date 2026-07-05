@@ -1,4 +1,4 @@
-import neo4j from 'neo4j-driver';
+import { getPostgresPool } from '../lib/postgres';
 import OpenAI from 'openai';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
@@ -7,71 +7,53 @@ import * as path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
 dotenv.config({ path: path.resolve(process.cwd(), 'frontend/.env.local') });
 
-export async function init_vector_index(driver: any) {
-  const session = driver.session();
+export async function get_unembedded_chunks(pool: any, limit?: number): Promise<{ id: string; text: string }[]> {
+  const client = await pool.connect();
   try {
-    console.log("正在檢測並建立 Chunk 向量索引...");
-    await session.run(`
-      CREATE VECTOR INDEX chunk_embedding_index IF NOT EXISTS
-      FOR (c:Chunk) ON (c.embedding)
-      OPTIONS {indexConfig: {
-        \`vector.dimensions\`: 1536,
-        \`vector.similarity_function\`: 'cosine'
-      }}
-    `);
-    console.log("向量索引建立指令已送出。");
-  } finally {
-    await session.close();
-  }
-}
-
-export async function get_unembedded_chunks(driver: any, limit?: number): Promise<{ id: string; text: string }[]> {
-  const session = driver.session();
-  try {
-    let query = `
-      MATCH (c:Chunk)
-      WHERE c.embedding IS NULL
-      RETURN c.id AS id, c.text AS text
-    `;
+    let query = 'SELECT id, text FROM chunks WHERE embedding IS NULL';
+    const params: any[] = [];
     if (limit) {
-      query += ` LIMIT ${limit}`;
+      query += ' LIMIT $1';
+      params.push(limit);
     }
     
-    console.log("正在自 Neo4j 讀取未向量化 Chunk...");
-    const result = await session.run(query);
-    return result.records.map((record: any) => ({
-      id: record.get('id') as string,
-      text: record.get('text') as string
+    console.log('正在自 PostgreSQL 讀取未向量化 Chunk...');
+    const result = await client.query(query, params);
+    return result.rows.map((r: any) => ({
+      id: r.id as string,
+      text: r.text as string
     }));
   } finally {
-    await session.close();
+    client.release();
   }
 }
 
-export async function update_embeddings_batch(driver: any, batch_data: { id: string; embedding: number[] }[]) {
-  const session = driver.session();
+export async function update_embeddings_batch(pool: any, batch_data: { id: string; embedding: number[] }[]) {
+  const client = await pool.connect();
   try {
-    const query = `
-      UNWIND $batch AS item
-      MATCH (c:Chunk {id: item.id})
-      SET c.embedding = item.embedding
-    `;
-    await session.run(query, { batch: batch_data });
+    await client.query('BEGIN');
+    const query = 'UPDATE chunks SET embedding = $1 WHERE id = $2';
+    for (const item of batch_data) {
+      // pgvector 在 node-postgres 中需要格式化為 "[0.1, 0.2, ...]" 字串寫入
+      const vectorStr = `[${item.embedding.join(',')}]`;
+      await client.query(query, [vectorStr, item.id]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
   } finally {
-    await session.close();
+    client.release();
   }
 }
 
 export async function main(limit?: number, batchSize: number = 100) {
-  const uri = process.env.NEO4J_URI;
-  const username = process.env.NEO4J_USERNAME || 'neo4j';
-  const password = process.env.NEO4J_PASSWORD;
-  
+  const connectionString = process.env.DATABASE_URL;
   const openai_key = process.env.OPENAI_API_KEY;
   const openai_base = process.env.OPENAI_API_BASE;
   
-  if (!uri || !password) {
-    console.log("[錯誤] 請檢查環境變數中的 NEO4J_URI 與 NEO4J_PASSWORD 設定！");
+  if (!connectionString) {
+    console.log("[錯誤] 請檢查環境變數中的 DATABASE_URL 設定！");
     return;
   }
       
@@ -80,26 +62,21 @@ export async function main(limit?: number, batchSize: number = 100) {
     return;
   }
 
-  console.log("正在建立連線驅動...");
+  console.log("正在初始化 OpenAI 客戶端與 PostgreSQL 連線池...");
   const openai = new OpenAI({
     apiKey: openai_key,
     baseURL: openai_base || undefined
   });
   
-  const driver = neo4j.driver(uri, neo4j.auth.basic(username, password));
+  const pool = getPostgresPool();
   try {
-    await driver.verifyConnectivity();
-    
-    // 初始化向量索引
-    await init_vector_index(driver);
-    
     // 獲取尚未向量化的 Chunks
-    const chunks = await get_unembedded_chunks(driver, limit);
+    const chunks = await get_unembedded_chunks(pool, limit);
     const total = chunks.length;
-    console.log(`找到 ${total} 筆未向量化的 Chunk 節點。`);
+    console.log(`找到 ${total} 筆未向量化的 Chunk 記錄。`);
     
     if (total === 0) {
-      console.log("所有 Chunk 節點均已完成向量化。");
+      console.log("所有 Chunk 記錄均已完成向量化。");
       return;
     }
 
@@ -120,17 +97,17 @@ export async function main(limit?: number, batchSize: number = 100) {
           embedding: response.data[idx].embedding
         }));
         
-        await update_embeddings_batch(driver, batchData);
-        console.log(`  [進度] 已成功寫入第 ${i + batch.length} / ${total} 筆 Chunk 向量`);
-      } catch (err) {
-        console.error(`  [錯誤] 處理批次 ${i} 至 ${i + batch.length} 失敗:`, err);
+        await update_embeddings_batch(pool, batchData);
+        console.log(`  [進度] 已成功更新第 ${i + batch.length} / ${total} 筆 Chunk 向量`);
+      } catch (err: any) {
+        console.error(`  [錯誤] 處理批次 ${i} 至 ${i + batch.length} 失敗:`, err.message);
       }
     }
     
     console.log("向量補全更新執行完畢！");
   } finally {
-    await driver.close();
-    console.log("Neo4j 連線已關閉。");
+    await pool.end();
+    console.log("PostgreSQL 連線池已關閉。");
   }
 }
 

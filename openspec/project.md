@@ -21,41 +21,35 @@
 
 專案採用 **圖文分離 雙資料庫** 的全棧 Next.js 應用程式架構：
 
-```
-                    ┌──────────────────────────────┐
-                    │       Vercel (Next.js)       │
-                    │                              │
-                    │   ┌──────────────────────┐   │
-                    │   │    React 前端 UI     │   │
-                    │   └──────────┬───────────┘   │
-                    │              │ (HTTPS)       │
-                    │              ▼               │
-                    │   ┌──────────────────────┐   │
-                    │   │ Serverless API 路由  │   │
-                    │   │ (Next.js Route)      │   │
-                    │   └──────┬───────────┬───┘   │
-                    └──────────┼───────────┼───────┘
-                               │           │ (MD5 Cache)
-                               │           ▼
-                               │   ┌───────────────┐
-                               │   │ Upstash Redis │
-                               │   │ (極速快取層)  │
-                               │   └───────────────┘
-          (SQL / pgvector)     │           │ (Bolt over TLS)
-          ┌────────────────────┘           ▼
-          ▼                             ┌──────────────────────────────┐
-┌──────────────────────────────┐        │      Neo4j AuraDB Free       │
-│      Supabase Postgres       │        │                              │
-│                              │        │ • 實體關係圖譜骨架           │
-│ • judgments 全文 (Trigram)   │        │ • Person/Law/Crime/Item      │
-│ • sections 段落結構          │        └──────────────────────────────┘
-│ • chunks 切片與向量 (HNSW)   │
-└──────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Vercel ["Vercel (Next.js)"]
+        UI["React 前端 UI"]
+        API["Serverless API 路由<br/>(Next.js Routes)"]
+        UI -->|HTTPS| API
+    end
+
+    Redis["Upstash Redis<br/>(極速快取層)"]
+    Postgres["Supabase Postgres<br/>(關係與向量庫)"]
+    Neo4j["Neo4j AuraDB Free<br/>(圖資料庫)"]
+
+    API -->|MD5 Cache| Redis
+    API -->|SQL / pgvector| Postgres
+    API -->|Bolt over TLS| Neo4j
+
+    classDef default fill:#0f172a,stroke:#334155,stroke-width:1px,color:#f8fafc;
+    classDef highlight fill:#1e1b4b,stroke:#4f46e5,stroke-width:1px,color:#e0e7ff;
+    class Vercel,UI,API highlight;
 ```
 
-### 2.1 數據導入模組 (Data Ingestion Script)
-* 開發獨立的 TypeScript 解析腳本（位於 `frontend/src/scripts/`），用以讀取司法院 OpenData 的判決書 JSON 檔案。
-* 執行數據清洗、文字分塊與實體擷取，並批量進行雙寫導入。
+### 2.1 數據導入與任務佇列模組 (Data Ingestion & Jobs Queue)
+* **增量任務佇列 (Jobs Queue)**：使用 `verdict_sync_jobs` 資料庫表作為佇列，登錄本地的判決書檔案同步任務，支援狀態追蹤（Pending、Processing、Completed、Failed）與錯誤日誌記錄。
+* **管理後台與 API 管道**：
+  * `/admin`：提供現代化維運儀表板，可即時監控任務佇列狀態、一鍵重試失敗任務、手動觸發檔案登錄、執行雙寫同步與社群重新偵測。
+  * `/api/admin/sync`：執行雙資料庫雙寫 Ingestion，並透過手寫併發限制池（Concurrency = 2）來防範 Neo4j AuraDB 免費版發生死鎖（Deadlock），並支援 `ENABLE_AUTO_SYNC` 環境變數保險。
+  * `/api/admin/jobs`：提供佇列統計數據與失敗任務批次重置。
+  * `/api/admin/community-detection`：提供手動 LPA 社群傳播演算法重新運算，回填節點 `community` 屬性。
+  * `check_locks.ts`：提供活動連線診斷，可用於強制終止資料庫卡死的 zombie transactions。
 
 ### 2.2 實體與關係擷取 (NER)
 * 從判決全文中辨識出重要實體：
@@ -81,6 +75,7 @@
 * **`judgments` (主表)**：儲存判決書基本 metadata、`main_text` (主文)、`fact_reason` (事實及理由全文)。
 * **`sections` (段落表)**：儲存拆分後的段落結構與角色標記（原告主張、被告抗辯、法院見解等）。
 * **`chunks` (切片表)**：儲存文字切片，並配置 `embedding` 欄位為 `VECTOR(1536)`。
+* **`verdict_sync_jobs` (任務佇列表)**：儲存判決書增量匯入同步任務。欄位包含 `id` (PK)、`jid` (唯一案號鍵)、`file_path` (實體檔案路徑)、`status` (任務狀態：pending/processing/completed/failed)、`error_message` (錯誤日誌)、`retry_count` (重試次數)、`created_at` 與 `updated_at`。配置 `(status, created_at)` 複合索引以利快速提取排程任務。
 
 ### 3.2 Neo4j 拓撲節點
 * **`Judgment` (判決骨架)**：僅保留 `id` (PK)、`court`、`court_level`、`case_type`、`date`、`reason`。無長文本與向量。

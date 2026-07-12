@@ -1,27 +1,6 @@
 import { NextResponse } from 'next/server';
-import neo4j, { Driver } from 'neo4j-driver';
+import { getNeo4jDriver } from '@/lib/neo4j';
 import { getPostgresPool } from '@/lib/postgres';
-
-// 宣告全域變數快取，防止 Serverless 冷啟動連線數溢出
-declare global {
-  var neo4jDriver: Driver | undefined;
-}
-
-// 獲取或建立 Neo4j 驅動實例
-function getNeo4jDriver(): Driver {
-  if (!globalThis.neo4jDriver) {
-    const uri = process.env.NEO4J_URI;
-    const user = process.env.NEO4J_USERNAME || 'neo4j';
-    const password = process.env.NEO4J_PASSWORD;
-
-    if (!uri || !password) {
-      throw new Error('缺少 Neo4j 連線環境變數！');
-    }
-
-    globalThis.neo4jDriver = neo4j.driver(uri, neo4j.auth.basic(user, password));
-  }
-  return globalThis.neo4jDriver;
-}
 
 export async function GET(request: Request) {
   try {

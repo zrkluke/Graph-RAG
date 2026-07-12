@@ -376,6 +376,121 @@ export function getJsonFiles(dir: string): string[] {
   return results;
 }
 
+export async function import_single_file(file_path: string, currentSession: any, pgPool: any): Promise<void> {
+  const parent_folder = path.basename(path.dirname(file_path));
+  
+  const file_content = fs.readFileSync(file_path, 'utf8');
+  const data = JSON.parse(file_content);
+
+  let court_info = parse_court_from_folder(parent_folder);
+  if (!court_info) {
+    // 優先從 JFULL 第一行解析法院名稱 (例如 "臺灣屏東地方法院民事判決")
+    const firstLine = data.JFULL ? data.JFULL.split(/\r?\n/).map((l: string) => l.trim()).find((l: string) => l.length > 0) || '' : '';
+    const cleanCourtName = firstLine.replace(/(民事|刑事|行政|憲法|家事)?(判決|裁定|處分|決定書|決定)$/, '').trim();
+    if (cleanCourtName) {
+      // 從首行結尾提取案件種類 (例如 "民事判決" -> "民事")，若無則預設為 "民事"
+      const caseTypeMatch = firstLine.match(/(民事|刑事|行政|憲法|家事)(判決|裁定|處分|決定書|決定)$/);
+      const caseType = caseTypeMatch ? (caseTypeMatch[1] === '家事' ? '民事' : caseTypeMatch[1]) : '民事';
+      court_info = parse_court_from_folder(cleanCourtName + caseType);
+    }
+  }
+
+  if (!court_info) {
+    throw new Error(`無法解析法院與案件種類：資料夾 '${parent_folder}'，檔案第一行: '${data.JFULL ? data.JFULL.substring(0, 15) : ''}'`);
+  }
+  
+  const jid = data.JID;
+  const jdate = data.JDATE || '';
+  const jtitle = data.JTITLE || '';
+  const jfull = data.JFULL || '';
+  
+  if (!jid || !jfull) {
+    throw new Error(`檔案缺少 JID 或 JFULL`);
+  }
+  
+  const clean_text = clean_judgment_text(jfull);
+  
+  const extracted_stats = extract_statutes(clean_text);
+  let laws_list = extracted_stats.map(s => `${s.law}第${s.article}條${s.sub}`);
+  laws_list = Array.from(new Set(laws_list));
+  
+  const parties = extract_parties_and_judges(jfull);
+  const crimes = extract_crimes(jtitle, clean_text);
+  const items = extract_items(clean_text);
+  
+  let date_str: string | null = null;
+  if (jdate.length === 8) {
+    date_str = `${jdate.substring(0, 4)}-${jdate.substring(4, 6)}-${jdate.substring(6, 8)}`;
+  }
+  
+  let main_text = "";
+  let fact_reason = clean_text;
+  
+  const split_patterns = [/事實及理由\r?\n/, /事實\r?\n/, /理　由\r?\n/, /理由\r?\n/];
+  for (const p of split_patterns) {
+    const parts = clean_text.split(p);
+    if (parts.length >= 2) {
+      main_text = parts[0].trim();
+      fact_reason = parts.slice(1).join('\n').trim();
+      break;
+    }
+  }
+  
+  if (!main_text) {
+    main_text = jtitle;
+  }
+  
+  const sections_list = split_judgment_into_sections(court_info.case_type || '其他', fact_reason);
+  const formatted_sections: any[] = [];
+  const formatted_chunks: any[] = [];
+  
+  for (const sec of sections_list) {
+    const sec_id = `${jid}_sec_${sec.index}`;
+    formatted_sections.push({
+      id: sec_id,
+      index: sec.index,
+      role: sec.role,
+      type: sec.type,
+      text: sec.text
+    });
+    
+    const chunks_list = sec.chunks || [];
+    for (let chk_idx = 0; chk_idx < chunks_list.length; chk_idx++) {
+      formatted_chunks.push({
+        id: `${sec_id}_chk_${chk_idx + 1}`,
+        section_id: sec_id,
+        index: chk_idx + 1,
+        text: chunks_list[chk_idx]
+      });
+    }
+  }
+
+  const import_data = {
+    judgment: {
+      id: jid,
+      case_type: court_info.case_type,
+      court: court_info.unit_norm,
+      court_level: court_info.court_root_norm,
+      date: date_str,
+      reason: jtitle,
+      main_text: main_text,
+      fact_reason: fact_reason
+    },
+    sections: formatted_sections,
+    chunks: formatted_chunks,
+    laws: laws_list,
+    parties: parties,
+    crimes: crimes,
+    items: items
+  };
+  
+  // 1. 寫入 PostgreSQL
+  await write_to_postgres(pgPool, import_data);
+  
+  // 2. 寫入 Neo4j
+  await currentSession.executeWrite((tx: any) => write_to_neo4j(tx, import_data));
+}
+
 export async function import_files(json_files: string[]) {
   const PromiseWithTimeout = <T>(promise: Promise<T>, ms: number, errMsg: string): Promise<T> => {
     let timeoutId: NodeJS.Timeout;
@@ -423,109 +538,6 @@ export async function import_files(json_files: string[]) {
     console.log(`啟動雙資料庫高併發匯入 (併發數: ${concurrency})...`);
     const startTime = Date.now();
 
-    const import_single_file = async (file_path: string, currentSession: any): Promise<void> => {
-      const parent_folder = path.basename(path.dirname(file_path));
-      
-      const court_info = parse_court_from_folder(parent_folder);
-      if (!court_info) {
-        throw new Error(`無法解析資料夾名稱 '${parent_folder}'`);
-      }
-          
-      const file_content = fs.readFileSync(file_path, 'utf8');
-      const data = JSON.parse(file_content);
-      
-      const jid = data.JID;
-      const jdate = data.JDATE || '';
-      const jtitle = data.JTITLE || '';
-      const jfull = data.JFULL || '';
-      
-      if (!jid || !jfull) {
-        throw new Error(`檔案缺少 JID 或 JFULL`);
-      }
-      
-      const clean_text = clean_judgment_text(jfull);
-      
-      const extracted_stats = extract_statutes(clean_text);
-      let laws_list = extracted_stats.map(s => `${s.law}第${s.article}條${s.sub}`);
-      laws_list = Array.from(new Set(laws_list));
-      
-      const parties = extract_parties_and_judges(jfull);
-      const crimes = extract_crimes(jtitle, clean_text);
-      const items = extract_items(clean_text);
-      
-      let date_str: string | null = null;
-      if (jdate.length === 8) {
-        date_str = `${jdate.substring(0, 4)}-${jdate.substring(4, 6)}-${jdate.substring(6, 8)}`;
-      }
-      
-      let main_text = "";
-      let fact_reason = clean_text;
-      
-      const split_patterns = [/事實及理由\r?\n/, /事實\r?\n/, /理　由\r?\n/, /理由\r?\n/];
-      for (const p of split_patterns) {
-        const parts = clean_text.split(p);
-        if (parts.length >= 2) {
-          main_text = parts[0].trim();
-          fact_reason = parts.slice(1).join('\n').trim();
-          break;
-        }
-      }
-      
-      if (!main_text) {
-        main_text = jtitle;
-      }
-      
-      const sections_list = split_judgment_into_sections(court_info.case_type || '其他', fact_reason);
-      const formatted_sections: any[] = [];
-      const formatted_chunks: any[] = [];
-      
-      for (const sec of sections_list) {
-        const sec_id = `${jid}_sec_${sec.index}`;
-        formatted_sections.push({
-          id: sec_id,
-          index: sec.index,
-          role: sec.role,
-          type: sec.type,
-          text: sec.text
-        });
-        
-        const chunks_list = sec.chunks || [];
-        for (let chk_idx = 0; chk_idx < chunks_list.length; chk_idx++) {
-          formatted_chunks.push({
-            id: `${sec_id}_chk_${chk_idx + 1}`,
-            section_id: sec_id,
-            index: chk_idx + 1,
-            text: chunks_list[chk_idx]
-          });
-        }
-      }
-
-      const import_data = {
-        judgment: {
-          id: jid,
-          case_type: court_info.case_type,
-          court: court_info.unit_norm,
-          court_level: court_info.court_root_norm,
-          date: date_str,
-          reason: jtitle,
-          main_text: main_text,
-          fact_reason: fact_reason
-        },
-        sections: formatted_sections,
-        chunks: formatted_chunks,
-        laws: laws_list,
-        parties: parties,
-        crimes: crimes,
-        items: items
-      };
-      
-      // 1. 寫入 PostgreSQL (包含全文、Sections、Chunks，不含向量)
-      await write_to_postgres(pgPool, import_data);
-      
-      // 2. 寫入 Neo4j (僅寫入骨架與關係鏈，移除 Section/Chunk 節點)
-      await currentSession.executeWrite((tx: any) => write_to_neo4j(tx, import_data));
-    };
-
     const runWorker = async (workerId: number) => {
       let session = driver.session();
       try {
@@ -541,7 +553,7 @@ export async function import_files(json_files: string[]) {
           while (retryCount < maxRetries && !success) {
             try {
               await PromiseWithTimeout(
-                import_single_file(file_path, session),
+                import_single_file(file_path, session, pgPool),
                 15000, // 擴大至 15 秒以相容雙寫時間
                 'Double-write database timeout'
               );

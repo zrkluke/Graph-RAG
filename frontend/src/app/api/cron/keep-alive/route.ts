@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import neo4j, { Driver } from 'neo4j-driver';
+import { getPostgresPool } from '@/lib/postgres';
 
 // 宣告全域變數快取，防止 Serverless 冷啟動連線數溢出
 declare global {
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
     // 2. 連線 Neo4j 並執行寫入操作以重置 72 小時計時器
     const driverInstance = getNeo4jDriver();
     const session = driverInstance.session();
+    let lastSeen = null;
 
     try {
       const cypher = `
@@ -49,19 +51,26 @@ export async function GET(request: Request) {
       
       const res = await session.run(cypher);
       const record = res.records[0];
-      const lastSeen = record ? record.get('lastSeen').toString() : null;
+      lastSeen = record ? record.get('lastSeen').toString() : null;
 
       console.log(`[Cron Success] Neo4j 心跳寫入成功，目前時間: ${lastSeen}`);
-
-      return NextResponse.json({
-        success: true,
-        message: '心跳更新成功，資料庫已成功重置活躍計時器！',
-        lastSeen,
-      });
 
     } finally {
       await session.close();
     }
+
+    // 3. 連線 Postgres (Supabase) 並執行輕量查詢以重置其活躍計時器
+    const pool = getPostgresPool();
+    const pgRes = await pool.query('SELECT 1 AS alive;');
+    const postgresAlive = pgRes.rows[0]?.alive;
+    console.log(`[Cron Success] Postgres (Supabase) 心跳查詢成功，alive: ${postgresAlive}`);
+
+    return NextResponse.json({
+      success: true,
+      message: '心跳更新成功，資料庫已成功重置活躍計時器！',
+      neo4jLastSeen: lastSeen,
+      postgresAlive: postgresAlive === 1,
+    });
 
   } catch (error: any) {
     console.error('[Cron Error] Keep-Alive 執行失敗:', error);

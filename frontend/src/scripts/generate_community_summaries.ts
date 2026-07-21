@@ -104,6 +104,7 @@ export async function generateSummaries() {
     // 準備計算 TF-IDF。我們需要統計每個 N-gram 出現在多少個社群中 (DF)
     const communityNGrams: Map<number, Map<string, number>> = new Map();
     const docFrequency = new Map<string, number>(); // 詞 -> 出現的社群數
+    const communityChunksMap = new Map<number, string[]>(); // 社群 ID -> chunks 文本陣列，避免重複查詢
 
     // 2. 批次查詢每個社群的判決書 ID，並從 Postgres 撈取文本，提取 N-grams
     console.log("\n📖 步驟 A：從 Postgres 撈取 Chunks 並統計社群詞頻...");
@@ -118,19 +119,26 @@ export async function generateSummaries() {
       
       if (judgmentIds.length === 0) continue;
 
+      // 限制大社群的採樣數量，最多只取前 50 筆判決進行特徵提取，避免大社群 OOM
+      const sampledIds = judgmentIds.length > 50 ? judgmentIds.slice(0, 50) : judgmentIds;
+
       // 自 Postgres 撈取 Chunks 文字
       const pgClient = await pgPool.connect();
-      let chunksText = '';
+      let chunkTexts: string[] = [];
       try {
         const res = await pgClient.query(`
           SELECT text FROM chunks WHERE judgment_id = ANY($1)
-        `, [judgmentIds]);
-        chunksText = res.rows.map(r => r.text).join('\n');
+        `, [sampledIds]);
+        chunkTexts = res.rows.map(r => r.text);
       } finally {
         pgClient.release();
       }
 
-      // 提取 N-grams
+      // 快取 Chunks 文本以供步驟 B 萃取代表句重複使用
+      communityChunksMap.set(commId, chunkTexts);
+
+      // 合併文本以提取 N-grams
+      const chunksText = chunkTexts.join('\n');
       const ngrams = extractNGrams(chunksText);
       communityNGrams.set(commId, ngrams);
 
@@ -138,7 +146,7 @@ export async function generateSummaries() {
       for (const word of ngrams.keys()) {
         docFrequency.set(word, (docFrequency.get(word) || 0) + 1);
       }
-      console.log(`  - 社群 ${commId}: 讀取 ${judgmentIds.length} 筆判決，提取了 ${ngrams.size} 個特徵詞`);
+      console.log(`  - 社群 ${commId}: 讀取 ${judgmentIds.length} 筆判決 (採樣 ${sampledIds.length} 筆)，提取了 ${ngrams.size} 個特徵詞`);
     }
 
     // 3. 計算 TF-IDF 並對每個社群進行特徵提取
@@ -182,27 +190,13 @@ export async function generateSummaries() {
       `, { commId });
       const representativeItems = itemsRes.records.map((rec: any) => rec.get('name') as string);
 
-      // 5. 萃取代表句 (方法三)
-      // 自 Postgres 重新查詢該社群的 Chunks 句子，進行篩選
-      const jidsResult = await session.run(`
-        MATCH (j:Judgment) WHERE j.community = $commId RETURN j.id AS id
-      `, { commId });
-      const judgmentIds = jidsResult.records.map((rec: any) => rec.get('id') as string);
-
-      const pgClient = await pgPool.connect();
+      // 5. 萃取代表句 (方法三) - 直接使用步驟 A 快取的 chunksText，消除重複資料庫查詢
+      const chunkTexts = communityChunksMap.get(commId) || [];
       let sentences: string[] = [];
-      try {
-        const res = await pgClient.query(`
-          SELECT text FROM chunks WHERE judgment_id = ANY($1)
-        `, [judgmentIds]);
-        // 以 。 切分成獨立句子
-        res.rows.forEach(r => {
-          const sents = r.text.split(/[。]/).map(s => s.trim()).filter(s => s.length >= 30 && s.length <= 120);
-          sentences.push(...sents);
-        });
-      } finally {
-        pgClient.release();
-      }
+      chunkTexts.forEach(txt => {
+        const sents = txt.split(/[。]/).map(s => s.trim()).filter(s => s.length >= 30 && s.length <= 120);
+        sentences.push(...sents);
+      });
 
       // 去重
       sentences = Array.from(new Set(sentences));

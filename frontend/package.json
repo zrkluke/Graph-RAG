@@ -11,13 +11,14 @@
     "db:connect-test": "tsx src/scripts/test_neo4j_connection.ts",
     "db:import": "tsx src/scripts/import_judgments.ts",
     "db:import-sample": "tsx src/scripts/import_sample.ts",
-    "db:community": "tsx src/scripts/community_detection.ts",
+    "db:community": "tsx src/scripts/community_detection.ts && npm run db:summaries",
     "db:update-embeddings": "tsx src/scripts/update_embeddings.ts",
     "db:verify": "tsx src/scripts/verify_db.ts",
     "db:search": "tsx src/scripts/search_pipeline.ts",
     "db:flush-redis": "tsx src/scripts/flush_redis.ts",
     "db:init-postgres": "tsx src/scripts/init_postgres.ts",
-    "db:evaluate": "tsx src/scripts/evaluate_search.ts"
+    "db:evaluate": "tsx src/scripts/evaluate_search.ts",
+    "db:summaries": "tsx src/scripts/generate_community_summaries.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

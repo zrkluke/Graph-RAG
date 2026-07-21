@@ -72,8 +72,9 @@ export async function generateSummaries() {
   const driver = neo4j.driver(NEO4J_URI!, neo4j.auth.basic(NEO4J_USERNAME, NEO4J_PASSWORD!));
   const pgPool = getPostgresPool();
   
+  let session: any;
   try {
-    const session = driver.session();
+    session = driver.session();
     
     // 1. 查詢所有不重複的社群 ID 及其判決書數量
     console.log("正在從 Neo4j 查詢社群分佈...");
@@ -95,7 +96,7 @@ export async function generateSummaries() {
     console.log(`共發現 ${allCommunities.length} 個社群，過濾掉微型社群 (小於 ${MIN_COMMUNITY_SIZE} 筆判決) 後，剩下 ${communities.length} 個活躍社群。`);
     if (communities.length === 0) {
       console.log("無符合篩選大小之活躍社群，結束程序。");
-      await session.close();
+      if (session) await session.close();
       return;
     }
 
@@ -166,7 +167,7 @@ export async function generateSummaries() {
       }
       
       // 排序並取 Top 10 關鍵詞
-      const topKeywords = tfidfList
+      let topKeywords = tfidfList
         .sort((a, b) => b.score - a.score)
         .slice(0, 10)
         .map(x => x.word);
@@ -190,6 +191,21 @@ export async function generateSummaries() {
       `, { commId });
       const representativeItems = itemsRes.records.map((rec: any) => rec.get('name') as string);
 
+      // Fallback 關鍵詞機制：如果分詞與 TF-IDF 未能提取出詞彙，則由主要引用法規與罪名填充
+      if (topKeywords.length === 0) {
+        representativeLaws.forEach((law: string) => {
+          const clean = law.replace(/^中華民國/, '');
+          if (clean.length >= 2) topKeywords.push(clean);
+        });
+        representativeCrimes.forEach((crime: string) => {
+          if (crime.length >= 2) topKeywords.push(crime);
+        });
+        if (topKeywords.length === 0) {
+          topKeywords.push("法律分群");
+        }
+        topKeywords = topKeywords.slice(0, 10);
+      }
+
       // 5. 萃取代表句 (方法三) - 直接使用步驟 A 快取的 chunksText，消除重複資料庫查詢
       const chunkTexts = communityChunksMap.get(commId) || [];
       let sentences: string[] = [];
@@ -200,6 +216,15 @@ export async function generateSummaries() {
 
       // 去重
       sentences = Array.from(new Set(sentences));
+
+      // 防禦性 Backoff 機制：若沒有符合長度 (30~120) 的句子，放寬至 10~150 字
+      if (sentences.length === 0) {
+        chunkTexts.forEach(txt => {
+          const sents = txt.split(/[。]/).map(s => s.trim()).filter(s => s.length >= 10 && s.length <= 150);
+          sentences.push(...sents);
+        });
+        sentences = Array.from(new Set(sentences));
+      }
 
       // 對句子評分：包含 Top 關鍵字、代表法條、代表罪名的數量
       let bestSentence = "無符合之代表性判決陳述。";
@@ -250,7 +275,7 @@ export async function generateSummaries() {
     }
 
     // 6. 輸出成 JSON 檔案
-    const outputDir = path.resolve(process.cwd(), 'src/resources');
+    const outputDir = path.resolve(__dirname, '../resources');
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
@@ -258,11 +283,13 @@ export async function generateSummaries() {
     fs.writeFileSync(outputPath, JSON.stringify(allCommunitySummaries, null, 2), 'utf8');
     
     console.log(`\n💾 社群特徵摘要成功寫入檔案: ${outputPath}`);
-    await session.close();
 
   } catch (error) {
     console.error("生成社群摘要出錯：", error);
   } finally {
+    if (session) {
+      await session.close();
+    }
     await driver.close();
     await pgPool.end();
   }

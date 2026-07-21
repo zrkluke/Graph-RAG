@@ -47,6 +47,11 @@ export async function GET(request: Request) {
 
     // 3. 連線 Postgres (Supabase) 並執行實體表讀取以重置其活躍計時器
     try {
+      const dbUrl = process.env.DATABASE_URL || '';
+      const hostMatch = dbUrl.match(/@([^:/]+)/);
+      const pgHost = hostMatch ? hostMatch[1] : 'unknown';
+      console.log(`🔌 [PostgreSQL] 嘗試連線至主機: ${pgHost}`);
+
       const pool = getPostgresPool();
       // 升級為實體表查詢，防止 Supabase 將單純的 SELECT 1 視為無效活動
       const pgRes = await pool.query('SELECT id FROM judgments LIMIT 1;');

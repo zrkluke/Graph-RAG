@@ -95,11 +95,32 @@ function computeRRF(vectorCandidates: Candidate[], keywordCandidates: Candidate[
     .map(([id, score]) => ({ id, score }));
 }
 
+// NDCG@10 計算
+function calculateNDCG(candidates: Candidate[], expectedIds: string[], p: number = 10): number {
+  const topCandidates = candidates.slice(0, p);
+  let dcg = 0;
+  for (let i = 0; i < topCandidates.length; i++) {
+    const rank = i + 1;
+    if (expectedIds.includes(topCandidates[i].id)) {
+      dcg += 1 / Math.log2(rank + 1);
+    }
+  }
+
+  let idcg = 0;
+  const actualExpectedCount = Math.min(expectedIds.length, p);
+  for (let j = 0; j < actualExpectedCount; j++) {
+    const rank = j + 1;
+    idcg += 1 / Math.log2(rank + 1);
+  }
+
+  return idcg === 0 ? 0 : dcg / idcg;
+}
+
 async function evaluate() {
   console.log('📊 開始執行檢索演算法黃金評估與調優 (RRF Parameter Tuning)...');
   
   // 1. 讀取固定的黃金標準測試集 JSON 檔案
-  const jsonPath = path.resolve(process.cwd(), 'src/resources/evaluation_gold_standard.json');
+  const jsonPath = path.resolve(__dirname, '../resources/evaluation_gold_standard.json');
   if (!fs.existsSync(jsonPath)) {
     console.error(`❌ 找不到黃金標準測試集檔案: ${jsonPath}`);
     return;
@@ -113,10 +134,10 @@ async function evaluate() {
   const summary: any = {};
 
   for (const k of kOptions) {
-    summary[`rrf_k_${k}`] = { hitAt3: 0, hitAt5: 0, timeTotalMs: 0 };
+    summary[`rrf_k_${k}`] = { hitAt3: 0, hitAt5: 0, ndcgAt10Total: 0, timeTotalMs: 0 };
   }
-  summary['keyword'] = { hitAt3: 0, hitAt5: 0, timeTotalMs: 0 };
-  summary['vector'] = { hitAt3: 0, hitAt5: 0, timeTotalMs: 0 };
+  summary['keyword'] = { hitAt3: 0, hitAt5: 0, ndcgAt10Total: 0, timeTotalMs: 0 };
+  summary['vector'] = { hitAt3: 0, hitAt5: 0, ndcgAt10Total: 0, timeTotalMs: 0 };
 
   console.log('\n🏃 正在跑評估檢索測試集，這會呼叫 OpenAI Embedding API...');
   
@@ -149,19 +170,21 @@ async function evaluate() {
     const vectorTime = (tEndVector - tStartVector) + embedTime;
     summary['vector'].timeTotalMs += vectorTime;
 
-    // 評估 Keyword 召回率 (是否召回任一個 expected_id)
+    // 評估 Keyword 召回率與 NDCG@10 (是否召回任一個 expected_id)
     const kwTop3 = keywordCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
     const kwTop5 = keywordCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
     if (kwTop3) summary['keyword'].hitAt3++;
     if (kwTop5) summary['keyword'].hitAt5++;
+    summary['keyword'].ndcgAt10Total += calculateNDCG(keywordCandidates, expected_ids, 10);
 
-    // 評估 Vector 召回率
+    // 評估 Vector 召回率與 NDCG@10
     const vecTop3 = vectorCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
     const vecTop5 = vectorCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
     if (vecTop3) summary['vector'].hitAt3++;
     if (vecTop5) summary['vector'].hitAt5++;
+    summary['vector'].ndcgAt10Total += calculateNDCG(vectorCandidates, expected_ids, 10);
 
-    // 評估不同的 RRF k 參數
+    // 評估不同的 RRF k 參數與 NDCG@10
     for (const k of kOptions) {
       const tStartRRF = performance.now();
       const hybridCandidates = computeRRF(vectorCandidates, keywordCandidates, k);
@@ -174,16 +197,18 @@ async function evaluate() {
       const hybTop5 = hybridCandidates.slice(0, 5).some(c => expected_ids.includes(c.id));
       if (hybTop3) summary[rrfKey].hitAt3++;
       if (hybTop5) summary[rrfKey].hitAt5++;
+      summary[rrfKey].ndcgAt10Total += calculateNDCG(hybridCandidates, expected_ids, 10);
     }
 
     const defaultHybridCandidates = computeRRF(vectorCandidates, keywordCandidates, 10);
     const hybHit3 = defaultHybridCandidates.slice(0, 3).some(c => expected_ids.includes(c.id));
+    const currentNdcg = calculateNDCG(defaultHybridCandidates, expected_ids, 10);
     
     const kwStatus = kwTop3 ? '✅' : '❌';
     const vecStatus = vecTop3 ? '✅' : '❌';
     const hybStatus = hybHit3 ? '✅' : '❌';
 
-    console.log(`  [測項 ${id} | ${type}] 查詢: "${query}" (預期 JID: ${expected_ids[0].substring(0, 25)}...) ➡️ Keyword: ${kwStatus} | Vector: ${vecStatus} | Hybrid: ${hybStatus}`);
+    console.log(`  [測項 ${id} | ${type}] 查詢: "${query}" (預期 JID: ${expected_ids[0].substring(0, 25)}...) ➡️ Keyword: ${kwStatus} | Vector: ${vecStatus} | Hybrid: ${hybStatus} | Hybrid NDCG@10: ${(currentNdcg * 100).toFixed(1)}%`);
   }
 
   // 4. 輸出評估結果與調優結論
@@ -193,8 +218,9 @@ async function evaluate() {
   const printMetric = (name: string, data: any) => {
     const rate3 = ((data.hitAt3 / n) * 100).toFixed(1);
     const rate5 = ((data.hitAt5 / n) * 100).toFixed(1);
+    const avgNdcg = ((data.ndcgAt10Total / n) * 100).toFixed(1);
     const avgTime = (data.timeTotalMs / n).toFixed(1);
-    console.log(`🎯 ${name.padEnd(12)} | Recall@3: ${rate3}% (${data.hitAt3}/${n}) | Recall@5: ${rate5}% (${data.hitAt5}/${n}) | 平均耗時: ${avgTime} ms`);
+    console.log(`🎯 ${name.padEnd(12)} | Recall@3: ${rate3}% (${data.hitAt3}/${n}) | Recall@5: ${rate5}% (${data.hitAt5}/${n}) | NDCG@10: ${avgNdcg}% | 平均耗時: ${avgTime} ms`);
   };
 
   printMetric('Keyword', summary['keyword']);
@@ -214,7 +240,7 @@ async function evaluate() {
     }
   }
   console.log(`1. RRF 參數優化：在本次測試中，k=${bestK} 達到了最佳的命中率。`);
-  console.log(`2. 混合搜尋 (Hybrid RRF) 的召回率與穩定性顯著優於單一檢索演算法。`);
+  console.log(`2. 混合搜尋 (Hybrid RRF) 的召回率與排序品質（NDCG@10）顯著優於單一檢索演算法。`);
   console.log('======================================================');
 
   await pool.end();
